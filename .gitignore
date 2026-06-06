@@ -7,7 +7,7 @@ lbm_mpi
 lbm_cuda
 
 # Generated simulation output frames
-*.pgm
+frames/
 *.gif
 
 # Object files
