@@ -6,9 +6,14 @@ lbm_openmp
 lbm_mpi
 lbm_cuda
 
-# Generated simulation output frames
+# Generated simulation output frames and animations
 frames/
+animations/
 *.gif
+
+# Benchmark results and plots
+results/
+plots/
 
 # Object files
 *.o
