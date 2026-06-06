@@ -1,23 +1,4 @@
-/*
- * lbm_serial.c
- *
- * Serial D2Q9-BGK Lattice Boltzmann Method:
- * 2D incompressible flow past a circular cylinder.
- *
- * Outputs PGM image files of the velocity magnitude field every
- * OUTPUT_INTERVAL timesteps, and prints timing information.
- *
- * Build:   gcc -O3 -o lbm_serial lbm_serial.c -lm
- * Run:     ./lbm_serial
- * View:    use any PGM viewer, or convert to GIF:
- *              convert -delay 5 frames/frame_*.pgm output.gif
- *
- * References (algorithmic only; this code is original):
- *   - Mocz, P. (2020). "Create Your Own Lattice Boltzmann Simulation".
- *     https://github.com/pmocz/latticeboltzmann-python
- *   - Palabos LBM sample codes, University of Geneva.
- *   - Krüger et al., "The Lattice Boltzmann Method", Springer 2017.
- */
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,11 +13,10 @@
 #  define MKDIR(d) mkdir((d), 0755)
 #endif
 
-#define FRAMES_DIR "frames"
+#define FRAMES_DIR "frames/serial"
 
-/* ------------------------------------------------------------------ */
-/* Simulation parameters                                              */
-/* ------------------------------------------------------------------ */
+
+//Simulation parameters                                              
 #define NX               600      /* lattice width  (x direction)     */
 #define NY               200      /* lattice height (y direction)     */
 #define NSTEPS           10000    /* number of timesteps              */
@@ -140,6 +120,7 @@ static void save_pgm(int step,
 /* Main                                                               */
 /* ------------------------------------------------------------------ */
 int main(void) {
+    MKDIR("frames");
     MKDIR(FRAMES_DIR);
 
     size_t Ncells = (size_t)NX * NY;
