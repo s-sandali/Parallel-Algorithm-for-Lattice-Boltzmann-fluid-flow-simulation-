@@ -13,7 +13,8 @@
 #  define MKDIR(d) mkdir((d), 0755)
 #endif
 
-#define FRAMES_DIR "frames/serial"
+#define FRAMES_DIR     "frames/serial"
+#define FRAMES_PPM_DIR "frames/serial_ppm"
 
 
 //Simulation parameters                                              
@@ -117,11 +118,65 @@ static void save_pgm(int step,
 }
 
 /* ------------------------------------------------------------------ */
+/* Save vorticity field as a color PPM image (red=+, white=0, blue=-) */
+/* ------------------------------------------------------------------ */
+static void save_ppm_vorticity(int step,
+                               const double *ux, const double *uy,
+                               const int    *obstacle)
+{
+    char fname[80];
+    snprintf(fname, sizeof(fname), FRAMES_PPM_DIR "/frame_%05d.ppm", step);
+    FILE *fp = fopen(fname, "wb");
+    if (!fp) { perror(fname); return; }
+
+    double *omega = (double *)malloc(NX * NY * sizeof(double));
+    if (!omega) { fclose(fp); return; }
+
+    double omax = 1e-12;
+    for (int x = 0; x < NX; x++) {
+        for (int y = 0; y < NY; y++) {
+            if (obstacle[idx_c(x, y)]) { omega[idx_c(x, y)] = 0.0; continue; }
+            int xp = (x < NX-1) ? x+1 : x,  xm = (x > 0) ? x-1 : x;
+            int yp = (y < NY-1) ? y+1 : y,  ym = (y > 0) ? y-1 : y;
+            double w = (uy[idx_c(xp,y)] - uy[idx_c(xm,y)]) / (double)(xp - xm)
+                     - (ux[idx_c(x,yp)] - ux[idx_c(x,ym)]) / (double)(yp - ym);
+            omega[idx_c(x, y)] = w;
+            if (fabs(w) > omax) omax = fabs(w);
+        }
+    }
+
+    fprintf(fp, "P6\n%d %d\n255\n", NX, NY);
+    for (int y = NY-1; y >= 0; y--) {
+        for (int x = 0; x < NX; x++) {
+            unsigned char r, g, b;
+            if (obstacle[idx_c(x, y)]) {
+                r = g = b = 30;
+            } else {
+                double t = omega[idx_c(x, y)] / omax;   /* [-1, 1] */
+                if (t >= 0.0) {
+                    r = 255;
+                    g = (unsigned char)(255.0 * (1.0 - t));
+                    b = (unsigned char)(255.0 * (1.0 - t));
+                } else {
+                    r = (unsigned char)(255.0 * (1.0 + t));
+                    g = (unsigned char)(255.0 * (1.0 + t));
+                    b = 255;
+                }
+            }
+            fputc(r, fp); fputc(g, fp); fputc(b, fp);
+        }
+    }
+    free(omega);
+    fclose(fp);
+}
+
+/* ------------------------------------------------------------------ */
 /* Main                                                               */
 /* ------------------------------------------------------------------ */
 int main(void) {
     MKDIR("frames");
     MKDIR(FRAMES_DIR);
+    MKDIR(FRAMES_PPM_DIR);
 
     size_t Ncells = (size_t)NX * NY;
     size_t Nf     = Ncells * 9;
@@ -171,7 +226,8 @@ int main(void) {
            U_INLET * (2.0*CYL_R) / ((TAU - 0.5) / 3.0));
     fflush(stdout);
 
-    clock_t t0 = clock();
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
 
     /* -------------------------------------------------------------- */
     /* Main time-stepping loop                                        */
@@ -314,13 +370,14 @@ int main(void) {
                 }
             }
             save_pgm(t, ux, uy, obstacle);
+            save_ppm_vorticity(t, ux, uy, obstacle);
             printf("  step %5d / %d  saved frame\n", t, NSTEPS);
             fflush(stdout);
         }
     }
 
-    clock_t t1 = clock();
-    double elapsed = (double)(t1 - t0) / CLOCKS_PER_SEC;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
     double mlups   = ((double)NSTEPS * NX * NY) / elapsed / 1.0e6;
 
     printf("\nDone.\n");
