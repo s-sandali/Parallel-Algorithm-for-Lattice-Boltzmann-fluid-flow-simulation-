@@ -1,0 +1,349 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <omp.h>
+#ifdef _WIN32
+#  include <direct.h>
+#  define MKDIR(d) _mkdir(d)
+#else
+#  include <sys/stat.h>
+#  define MKDIR(d) mkdir((d), 0755)
+#endif
+
+#define FRAMES_DIR "frames/openmp"
+
+
+// Simulation parameters                                              
+#define NX               600      // lattice width  (x direction)    
+#define NY               200      // lattice height (y direction)     
+#define NSTEPS           10000    // number of timesteps             
+#define OUTPUT_INTERVAL  100      // save a frame every N steps      
+
+#define U_INLET          0.1      // inlet velocity (lattice units)   
+#define TAU              0.6      // BGK relaxation time             
+
+#define CYL_X            (NX/4)   // cylinder centre x                
+#define CYL_Y            (NY/2)   // cylinder centre y                
+#define CYL_R            15       // cylinder radius                  
+
+//D2Q9 lattice constants                                            
+/*
+ * Direction layout (i = 0..8):
+ *      6   2   5
+ *        \ | /
+ *      3 - 0 - 1
+ *        / | \
+ *      7   4   8
+ */
+static const int    ex[9]  = {  0,  1,  0, -1,  0,  1, -1, -1,  1 };
+static const int    ey[9]  = {  0,  0,  1,  0, -1,  1,  1, -1, -1 };
+static const double w_[9]  = { 4.0/9.0,
+                               1.0/9.0,  1.0/9.0,  1.0/9.0,  1.0/9.0,
+                               1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0 };
+static const int    opp[9] = { 0, 3, 4, 1, 2, 7, 8, 5, 6 };
+
+// Index helpers                                                      
+//f[x][y][i] flattened: i fastest, then y, then x.                  
+static inline int idx_f(int x, int y, int i) {
+    return ((x * NY) + y) * 9 + i;
+}
+static inline int idx_c(int x, int y) {
+    return x * NY + y;
+}
+
+//Equilibrium distribution                                           
+static inline double feq_i(int i, double rho, double ux, double uy) {
+    double cu  = 3.0 * (ex[i]*ux + ey[i]*uy);
+    double usq = 1.5 * (ux*ux + uy*uy);
+    return w_[i] * rho * (1.0 + cu + 0.5*cu*cu - usq);
+}
+
+
+// Save velocity magnitude as PGM (serial I/O — only called on output steps, so does not affect timing significantly)                    
+
+static void save_pgm(int step,
+                     const double *ux, const double *uy,
+                     const int    *obstacle)
+{
+    char fname[80];
+    snprintf(fname, sizeof(fname), FRAMES_DIR "/frame_%05d.pgm", step);
+    FILE *fp = fopen(fname, "wb");
+    if (!fp) { perror(fname); return; }
+
+    double umax = 1e-12;
+    for (int x = 0; x < NX; x++) {
+        for (int y = 0; y < NY; y++) {
+            int c = idx_c(x, y);
+            double m = sqrt(ux[c]*ux[c] + uy[c]*uy[c]);
+            if (m > umax) umax = m;
+        }
+    }
+
+    fprintf(fp, "P5\n%d %d\n255\n", NX, NY);
+    for (int y = NY-1; y >= 0; y--) {
+        for (int x = 0; x < NX; x++) {
+            int c = idx_c(x, y);
+            unsigned char px;
+            if (obstacle[c]) {
+                px = 0;
+            } else {
+                double m = sqrt(ux[c]*ux[c] + uy[c]*uy[c]);
+                int v = (int)(255.0 * m / umax);
+                if (v < 0)   v = 0;
+                if (v > 255) v = 255;
+                px = (unsigned char)v;
+            }
+            fputc(px, fp);
+        }
+    }
+    fclose(fp);
+}
+
+//Main                                                               
+int main(void) {
+    MKDIR("frames");
+    MKDIR(FRAMES_DIR);
+
+    size_t Ncells = (size_t)NX * NY;
+    size_t Nf     = Ncells * 9;
+
+    double *f        = (double *)malloc(Nf     * sizeof(double));
+    double *fnew     = (double *)malloc(Nf     * sizeof(double));
+    double *rho      = (double *)malloc(Ncells * sizeof(double));
+    double *ux       = (double *)malloc(Ncells * sizeof(double));
+    double *uy       = (double *)malloc(Ncells * sizeof(double));
+    int    *obstacle = (int    *)malloc(Ncells * sizeof(int));
+
+    if (!f || !fnew || !rho || !ux || !uy || !obstacle) {
+        fprintf(stderr, "allocation failed\n");
+        return 1;
+    }
+
+
+    // Initialise (parallelised — each cell is independent)           
+    // collapse(2) merges x and y loops into one 120 000-iter space.  
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int x = 0; x < NX; x++) {
+        for (int y = 0; y < NY; y++) {
+            int c = idx_c(x, y);
+            rho[c] = 1.0;
+            double pert = 1.0 + 0.02 * cos(2.0 * M_PI * x / (double)NX * 4.0);
+            ux[c]  = U_INLET * pert;
+            uy[c]  = 0.0;
+
+            int dx_ = x - CYL_X;
+            int dy_ = y - CYL_Y;
+            obstacle[c] = (dx_*dx_ + dy_*dy_ <= CYL_R*CYL_R) ? 1 : 0;
+            if (y == 0 || y == NY-1) obstacle[c] = 1;
+
+            for (int i = 0; i < 9; i++) {
+                f[idx_f(x, y, i)] = feq_i(i, rho[c], ux[c], uy[c]);
+            }
+        }
+    }
+
+    /* Report configuration */
+    int nthreads;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        nthreads = omp_get_num_threads();
+    }
+
+    printf("D2Q9-BGK LBM OpenMP: %dx%d lattice, %d steps, tau=%.2f, U=%.3f\n",
+           NX, NY, NSTEPS, TAU, U_INLET);
+    printf("Threads: %d\n", nthreads);
+    printf("Reynolds number ~ %.1f (based on cylinder diameter)\n",
+           U_INLET * (2.0*CYL_R) / ((TAU - 0.5) / 3.0));
+    fflush(stdout);
+
+    // Use omp_get_wtime() for wall-clock time.                       
+    
+    double t0 = omp_get_wtime();
+
+    
+    /* Main time-stepping loop                                        */
+    /* -------------------------------------------------------------- */
+    for (int t = 1; t <= NSTEPS; t++) {
+
+        /* ---------------------------------------------------------- *
+         * 1. Macroscopic variables (density, velocity).              *
+         *    Purely local: each cell reads only its own f values.    *
+         *    No data dependencies between cells → embarrassingly     *
+         *    parallel.  collapse(2) gives 120 000 iterations for     *
+         *    good load balance even with many threads.               *
+         * ---------------------------------------------------------- */
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int x = 0; x < NX; x++) {
+            for (int y = 0; y < NY; y++) {
+                int c = idx_c(x, y);
+                double r = 0.0, mx = 0.0, my = 0.0;
+                for (int i = 0; i < 9; i++) {
+                    double fi = f[idx_f(x, y, i)];
+                    r  += fi;
+                    mx += ex[i] * fi;
+                    my += ey[i] * fi;
+                }
+                rho[c] = r;
+                if (r > 0.0) {
+                    ux[c] = mx / r;
+                    uy[c] = my / r;
+                } else {
+                    ux[c] = 0.0;
+                    uy[c] = 0.0;
+                }
+                if (obstacle[c]) {
+                    ux[c] = 0.0;
+                    uy[c] = 0.0;
+                }
+            }
+        }
+
+        /* ---------------------------------------------------------- *
+         * 2. Collision (BGK relaxation).                             *
+         *    Also purely local: each cell updates its own f[i]       *
+         *    using its own rho, ux, uy computed in Step 1.           *
+         *    The obstacle check (continue) causes minor load         *
+         *    imbalance near the cylinder, but static schedule is     *
+         *    still best because the obstacle is small (~700 cells    *
+         *    out of 120 000).                                        *
+         * ---------------------------------------------------------- */
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int x = 0; x < NX; x++) {
+            for (int y = 0; y < NY; y++) {
+                int c = idx_c(x, y);
+                if (obstacle[c]) continue;
+                double r  = rho[c], vx = ux[c], vy = uy[c];
+                for (int i = 0; i < 9; i++) {
+                    int    fi_idx = idx_f(x, y, i);
+                    double feq    = feq_i(i, r, vx, vy);
+                    f[fi_idx] -= (1.0/TAU) * (f[fi_idx] - feq);
+                }
+            }
+        }
+
+        /* ---------------------------------------------------------- *
+         * 3. Streaming with bounce-back.                             *
+         *    Pull-style: each cell WRITES only to fnew at its own    *
+         *    (x,y) and READS from f at neighbour (x-ex, y-ey).      *
+         *    Because every cell writes to a unique location in fnew, *
+         *    there are no write conflicts — safe to parallelise.     *
+         *    Reads from f (the old buffer) are also safe because     *
+         *    collision already finished and f is read-only here.     *
+         * ---------------------------------------------------------- */
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int x = 0; x < NX; x++) {
+            for (int y = 0; y < NY; y++) {
+                int c = idx_c(x, y);
+                if (obstacle[c]) {
+                    for (int i = 0; i < 9; i++) fnew[idx_f(x, y, i)] = 0.0;
+                    continue;
+                }
+                for (int i = 0; i < 9; i++) {
+                    int xs = x - ex[i];
+                    int ys = y - ey[i];
+
+                    if (xs < 0)    xs += NX;
+                    if (xs >= NX)  xs -= NX;
+
+                    if (ys < 0 || ys >= NY) {
+                        fnew[idx_f(x, y, i)] = f[idx_f(x, y, opp[i])];
+                        continue;
+                    }
+
+                    if (obstacle[idx_c(xs, ys)]) {
+                        fnew[idx_f(x, y, i)] = f[idx_f(x, y, opp[i])];
+                    } else {
+                        fnew[idx_f(x, y, i)] = f[idx_f(xs, ys, i)];
+                    }
+                }
+            }
+        }
+
+        /* ---------------------------------------------------------- *
+         * 4. Zou-He velocity inlet at x = 0.                        *
+         *    Only NY-2 iterations — lightweight, but parallelised    *
+         *    for consistency.  Each y is independent.                *
+         * ---------------------------------------------------------- */
+        #pragma omp parallel for schedule(static)
+        for (int y = 1; y < NY-1; y++) {
+            int c = idx_c(0, y);
+            if (obstacle[c]) continue;
+
+            double f0 = fnew[idx_f(0, y, 0)];
+            double f2 = fnew[idx_f(0, y, 2)];
+            double f4 = fnew[idx_f(0, y, 4)];
+            double f3 = fnew[idx_f(0, y, 3)];
+            double f6 = fnew[idx_f(0, y, 6)];
+            double f7 = fnew[idx_f(0, y, 7)];
+
+            double rho_in = (f0 + f2 + f4 + 2.0*(f3 + f6 + f7))
+                          / (1.0 - U_INLET);
+
+            fnew[idx_f(0, y, 1)] = f3 + (2.0/3.0) * rho_in * U_INLET;
+            fnew[idx_f(0, y, 5)] = f7 + 0.5*(f4 - f2)
+                                 + (1.0/6.0) * rho_in * U_INLET;
+            fnew[idx_f(0, y, 8)] = f6 + 0.5*(f2 - f4)
+                                 + (1.0/6.0) * rho_in * U_INLET;
+        }
+
+        /* ---------------------------------------------------------- *
+         * 5. Zero-gradient outlet at x = NX-1.                      *
+         *    Again lightweight — each y copies 9 values from NX-2.   *
+         * ---------------------------------------------------------- */
+        #pragma omp parallel for schedule(static)
+        for (int y = 1; y < NY-1; y++) {
+            int co = idx_c(NX-1, y);
+            if (obstacle[co]) continue;
+            for (int i = 0; i < 9; i++) {
+                fnew[idx_f(NX-1, y, i)] = fnew[idx_f(NX-2, y, i)];
+            }
+        }
+
+        /* 6. Swap buffers (single pointer swap — no parallelism) */
+        double *tmp = f; f = fnew; fnew = tmp;
+
+        /* 7. Periodic output (PGM file I/O is serial) */
+        if (t % OUTPUT_INTERVAL == 0) {
+            /* Recompute macros for output — parallelised */
+            #pragma omp parallel for collapse(2) schedule(static)
+            for (int x = 0; x < NX; x++) {
+                for (int y = 0; y < NY; y++) {
+                    int c = idx_c(x, y);
+                    if (obstacle[c]) {
+                        ux[c] = 0.0; uy[c] = 0.0;
+                        continue;
+                    }
+                    double r = 0.0, mx = 0.0, my = 0.0;
+                    for (int i = 0; i < 9; i++) {
+                        double fi = f[idx_f(x, y, i)];
+                        r  += fi;
+                        mx += ex[i] * fi;
+                        my += ey[i] * fi;
+                    }
+                    if (r > 0.0) { ux[c] = mx/r; uy[c] = my/r; }
+                    else         { ux[c] = 0.0;   uy[c] = 0.0;   }
+                }
+            }
+            save_pgm(t, ux, uy, obstacle);
+            printf("  step %5d / %d  saved frame\n", t, NSTEPS);
+            fflush(stdout);
+        }
+    }
+
+    double t1 = omp_get_wtime();
+    double elapsed = t1 - t0;
+    double mlups   = ((double)NSTEPS * NX * NY) / elapsed / 1.0e6;
+
+    printf("\nDone.\n");
+    printf("Threads:    %d\n", nthreads);
+    printf("Elapsed:    %.3f s\n", elapsed);
+    printf("Throughput: %.2f MLUPS (mega lattice updates per second)\n",
+           mlups);
+
+    free(f); free(fnew);
+    free(rho); free(ux); free(uy); free(obstacle);
+    return 0;
+}
