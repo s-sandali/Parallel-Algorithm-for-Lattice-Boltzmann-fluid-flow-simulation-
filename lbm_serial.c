@@ -10,7 +10,7 @@
  * Build:   gcc -O3 -o lbm_serial lbm_serial.c -lm
  * Run:     ./lbm_serial
  * View:    use any PGM viewer, or convert to GIF:
- *              convert -delay 5 frame_*.pgm output.gif
+ *              convert -delay 5 frames/frame_*.pgm output.gif
  *
  * References (algorithmic only; this code is original):
  *   - Mocz, P. (2020). "Create Your Own Lattice Boltzmann Simulation".
@@ -24,6 +24,15 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#ifdef _WIN32
+#  include <direct.h>
+#  define MKDIR(d) _mkdir(d)
+#else
+#  include <sys/stat.h>
+#  define MKDIR(d) mkdir((d), 0755)
+#endif
+
+#define FRAMES_DIR "frames"
 
 /* ------------------------------------------------------------------ */
 /* Simulation parameters                                              */
@@ -92,8 +101,8 @@ static void save_pgm(int step,
                      const double *ux, const double *uy,
                      const int    *obstacle)
 {
-    char fname[64];
-    snprintf(fname, sizeof(fname), "frame_%05d.pgm", step);
+    char fname[80];
+    snprintf(fname, sizeof(fname), FRAMES_DIR "/frame_%05d.pgm", step);
     FILE *fp = fopen(fname, "wb");
     if (!fp) { perror(fname); return; }
 
@@ -131,6 +140,8 @@ static void save_pgm(int step,
 /* Main                                                               */
 /* ------------------------------------------------------------------ */
 int main(void) {
+    MKDIR(FRAMES_DIR);
+
     size_t Ncells = (size_t)NX * NY;
     size_t Nf     = Ncells * 9;
 
