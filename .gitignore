@@ -1,0 +1,17 @@
+# Compiled binaries
+*.exe
+*.out
+lbm_serial
+lbm_openmp
+lbm_mpi
+lbm_cuda
+
+# Generated simulation output frames
+*.pgm
+*.gif
+
+# Object files
+*.o
+
+# Editor/IDE
+.vscode/
