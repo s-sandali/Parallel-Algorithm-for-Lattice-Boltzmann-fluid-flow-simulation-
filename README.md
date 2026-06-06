@@ -120,7 +120,7 @@ Throughput: XX.XX MLUPS (mega lattice updates per second)
 **Convert frames to an animated GIF** (requires ImageMagick):
 
 ```bash
-convert -delay 5 frame_*.pgm output.gif
+convert -delay 5 frames/frame_*.pgm output.gif
 ```
 
 In the output images, pixel brightness encodes velocity magnitude — brighter regions are faster flow. The cylinder appears black (zero velocity, obstacle). The alternating vortices shed behind the cylinder become clearly visible from around step 2000 onward.
