@@ -219,46 +219,46 @@ Automates running each implementation with varying parameters, collects timing, 
 
 ### Run the serial baseline
 ```powershell
-python benchmark.py --serial
+python3 benchmark.py --serial
 ```
 
 ### Run the OpenMP thread sweep (1, 2, 4, 8, 16 threads)
 ```powershell
-python benchmark.py --openmp
+python3 benchmark.py --openmp
 ```
 Generates `plots/openmp.png` — execution time and speedup side by side.
 
 ### Run the MPI process sweep
 ```powershell
-python benchmark.py --mpi
+python3 benchmark.py --mpi
 ```
 Generates `plots/mpi.png`.
 
 ### Run the CUDA block-size sweep
 ```powershell
-python benchmark.py --cuda
+python3 benchmark.py --cuda
 ```
 Generates `plots/cuda.png`.
 
 ### Run everything at once
 ```powershell
-python benchmark.py --all
+python3 benchmark.py --all
 ```
 
 ### Generate combined comparison chart (from saved results)
 ```powershell
-python benchmark.py --compare
+python3 benchmark.py --compare
 ```
 Generates `plots/combined_comparison.png` — bar chart of best MLUPS per implementation.
 
 ### Re-plot without re-running (uses saved JSON results)
 ```powershell
-python benchmark.py --plot-only
+python3 benchmark.py --plot-only
 ```
 
 ### Repeat each config N times and use the median (for report accuracy)
 ```powershell
-python benchmark.py --openmp --runs 3
+python3 benchmark.py --openmp --runs 3
 ```
 
 Timing results are saved to `results/` as JSON files after each sweep.
@@ -269,10 +269,10 @@ Timing results are saved to `results/` as JSON files after each sweep.
 
 ### Make an animated GIF (color vorticity — recommended)
 ```powershell
-python visualize.py --gif serial_ppm
-python visualize.py --gif openmp_ppm
-python visualize.py --gif mpi_ppm
-python visualize.py --gif cuda_ppm
+python3 visualize.py --gif serial_ppm
+python3 visualize.py --gif openmp_ppm
+python3 visualize.py --gif mpi_ppm
+python3 visualize.py --gif cuda_ppm
 ```
 Output goes to `animations/<folder>.gif`.
 
@@ -289,14 +289,14 @@ python visualize.py --gif serial_ppm --delay 150   # slower (~7 fps)
 
 ### Side-by-side comparison snapshot (for the report)
 ```powershell
-python visualize.py --compare 5000 --folders serial_ppm openmp_ppm
+python3 visualize.py --compare 5000 --folders serial_ppm openmp_ppm
 ```
 Saves a single PNG to `plots/compare_serial_ppm_vs_openmp_ppm_step05000.png`.
 
 ### Pixel-level correctness check between two implementations
 ```powershell
-python visualize.py --diff serial openmp
-python visualize.py --diff serial mpi
+python3 visualize.py --diff serial openmp
+python3 visualize.py --diff serial mpi
 ```
 Reports max and mean pixel difference across all frames. Identical results print `✓`.
 
