@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LBM Algorithm Explainer – SE3082</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'DM Sans',sans-serif;background:#fff;color:#1a1a2e;line-height:1.7;overflow-x:hidden}
+.mono{font-family:'Space Mono',monospace}
+
+/* ─── hero ─── */
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:3rem 2rem;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-120px;right:-120px;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,#e8f4fd 0%,transparent 70%);z-index:0}
+.hero::after{content:'';position:absolute;bottom:-80px;left:-80px;width:300px;height:300px;border-radius:50%;background:radial-gradient(circle,#fff0f0 0%,transparent 70%);z-index:0}
+.hero>*{position:relative;z-index:1}
+.hero h1{font-size:clamp(2rem,5vw,3.5rem);font-weight:700;letter-spacing:-1px;margin-bottom:0.5rem}
+.hero h1 span{background:linear-gradient(135deg,#2563eb,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero .sub{font-size:1.15rem;color:#64748b;max-width:600px;margin:0.8rem auto 2rem}
+.hero .badge{display:inline-block;padding:6px 18px;border-radius:20px;font-size:0.85rem;font-weight:500;background:#f0f4ff;color:#3b5bdb;border:1px solid #dbe4ff}
+
+/* ─── sections ─── */
+section{max-width:960px;margin:0 auto;padding:4rem 2rem}
+.section-label{font-size:0.8rem;font-weight:700;text-transform:uppercase;letter-spacing:3px;margin-bottom:0.5rem}
+.section-label.blue{color:#2563eb}
+.section-label.red{color:#e03131}
+.section-label.green{color:#099268}
+.section-label.purple{color:#7c3aed}
+.section-label.orange{color:#e8590c}
+h2{font-size:clamp(1.6rem,3.5vw,2.4rem);font-weight:700;letter-spacing:-0.5px;margin-bottom:1rem}
+h3{font-size:1.2rem;font-weight:700;margin-bottom:0.5rem}
+p{color:#374151;margin-bottom:1rem;font-size:1.02rem}
+
+/* ─── versus card ─── */
+.vs-row{display:grid;grid-template-columns:1fr auto 1fr;gap:0;margin:2rem 0}
+.vs-card{padding:2rem;border-radius:16px;position:relative}
+.vs-card.left{background:#fff5f5;border:1.5px solid #fecaca}
+.vs-card.right{background:#f0fdf4;border:1.5px solid #bbf7d0}
+.vs-divider{display:flex;align-items:center;justify-content:center;padding:0 1rem}
+.vs-divider span{background:#1a1a2e;color:#fff;font-weight:700;font-size:0.9rem;width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.vs-card h3{margin-bottom:0.8rem}
+.vs-card .tag{display:inline-block;padding:3px 10px;border-radius:6px;font-size:0.75rem;font-weight:600;margin-bottom:0.8rem}
+.vs-card.left .tag{background:#fee2e2;color:#b91c1c}
+.vs-card.right .tag{background:#dcfce7;color:#166534}
+.vs-card ul{list-style:none;padding:0}
+.vs-card li{padding:6px 0;font-size:0.95rem;color:#374151;border-bottom:1px solid rgba(0,0,0,0.05)}
+.vs-card li:last-child{border:none}
+.vs-card li::before{content:'→ ';color:#94a3b8;font-weight:700}
+
+/* ─── step cards ─── */
+.step{display:grid;grid-template-columns:72px 1fr;gap:1.5rem;margin-bottom:2.5rem;position:relative}
+.step::after{content:'';position:absolute;left:35px;top:72px;bottom:-2.5rem;width:2px;background:linear-gradient(to bottom,#ddd,transparent)}
+.step:last-child::after{display:none}
+.step-num{width:72px;height:72px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:1.6rem;font-weight:700;color:#fff;flex-shrink:0}
+.step-num.s1{background:linear-gradient(135deg,#3b82f6,#2563eb)}
+.step-num.s2{background:linear-gradient(135deg,#f59e0b,#d97706)}
+.step-num.s3{background:linear-gradient(135deg,#8b5cf6,#7c3aed)}
+.step-num.s4{background:linear-gradient(135deg,#ef4444,#dc2626)}
+.step-num.s5{background:linear-gradient(135deg,#10b981,#059669)}
+.step-num.s6{background:linear-gradient(135deg,#64748b,#475569)}
+.step-body{padding-top:4px}
+.step-body h3{font-size:1.15rem;margin-bottom:0.3rem}
+.step-body .what{font-size:0.92rem;color:#6b7280;font-style:italic;margin-bottom:0.6rem}
+.step-body p{font-size:0.95rem}
+
+/* ─── code box ─── */
+.code-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:1rem 1.2rem;font-family:'Space Mono',monospace;font-size:0.82rem;line-height:1.8;color:#334155;margin:0.8rem 0 1rem;overflow-x:auto;white-space:pre}
+.code-box .kw{color:#2563eb;font-weight:700}
+.code-box .cm{color:#94a3b8}
+.code-box .val{color:#059669}
+.code-box .fn{color:#7c3aed}
+
+/* ─── diagram boxes ─── */
+.diagram{background:#fafbff;border:1.5px solid #e0e7ff;border-radius:14px;padding:1.5rem;margin:1.5rem 0;text-align:center}
+.diagram svg{max-width:100%}
+.diagram .caption{font-size:0.82rem;color:#6b7280;margin-top:0.6rem}
+
+/* ─── lattice viz ─── */
+.lattice-grid{display:inline-grid;grid-template-columns:repeat(3,56px);gap:4px;margin:1rem auto}
+.lattice-cell{width:56px;height:56px;border:2px solid #cbd5e1;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600;color:#475569;position:relative}
+.lattice-cell.center{border-color:#2563eb;background:#eff6ff}
+.lattice-cell .arrow{position:absolute;font-size:1.1rem;color:#2563eb}
+
+/* ─── parallel cards ─── */
+.par-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.2rem;margin:2rem 0}
+.par-card{border-radius:14px;padding:1.5rem;border:1.5px solid}
+.par-card.omp{background:#fef3c7;border-color:#fbbf24}
+.par-card.mpi{background:#dbeafe;border-color:#60a5fa}
+.par-card.cuda{background:#ede9fe;border-color:#a78bfa}
+.par-card h3{font-size:1rem;margin-bottom:0.6rem}
+.par-card p{font-size:0.88rem;color:#374151;margin-bottom:0}
+.par-card .icon{font-size:1.8rem;margin-bottom:0.5rem;display:block}
+.par-tag{display:inline-block;padding:2px 8px;border-radius:5px;font-size:0.7rem;font-weight:600;margin-bottom:0.6rem}
+
+/* ─── flow chart ─── */
+.flow{display:flex;flex-direction:column;align-items:center;gap:0;margin:1.5rem 0}
+.flow-box{padding:10px 28px;border-radius:10px;font-weight:600;font-size:0.9rem;text-align:center;min-width:260px}
+.flow-arrow{font-size:1.2rem;color:#94a3b8;padding:2px 0}
+.flow-box.f1{background:#dbeafe;color:#1e40af}
+.flow-box.f2{background:#fef3c7;color:#92400e}
+.flow-box.f3{background:#ede9fe;color:#5b21b6}
+.flow-box.f4{background:#fee2e2;color:#991b1b}
+.flow-box.f5{background:#d1fae5;color:#065f46}
+.flow-box.f6{background:#f1f5f9;color:#334155}
+
+/* ─── footer ─── */
+.footer{text-align:center;padding:3rem 2rem;color:#94a3b8;font-size:0.85rem}
+
+@media(max-width:700px){
+  .vs-row{grid-template-columns:1fr;gap:1rem}
+  .vs-divider{padding:0.5rem 0}
+  .par-grid{grid-template-columns:1fr}
+  .step{grid-template-columns:56px 1fr;gap:1rem}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ HERO ═══════════════ -->
+<div class="hero">
+  <div class="badge">SE3082 – Parallel Computing – Assignment 03</div>
+  <h1>The <span>Lattice Boltzmann Method</span></h1>
+  <p class="sub">A mesoscopic approach to computational fluid dynamics — how it works, step by step, and how we parallelise it across OpenMP, MPI, and CUDA.</p>
+  <svg width="600" height="160" viewBox="0 0 600 160" style="margin-top:1rem;max-width:100%">
+    <rect x="20" y="30" width="560" height="100" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5"/>
+    <circle cx="160" cy="80" r="18" fill="#1e293b"/>
+    <text x="160" y="85" text-anchor="middle" fill="#fff" font-size="10" font-weight="700">CYL</text>
+    <!-- flow arrows -->
+    <g fill="none" stroke="#3b82f6" stroke-width="1.5" opacity="0.6">
+      <line x1="30" y1="50" x2="70" y2="50" marker-end="url(#ah)"/>
+      <line x1="30" y1="80" x2="70" y2="80" marker-end="url(#ah)"/>
+      <line x1="30" y1="110" x2="70" y2="110" marker-end="url(#ah)"/>
+    </g>
+    <!-- vortex street hint -->
+    <path d="M200,80 Q230,55 260,80 Q290,105 320,80 Q350,55 380,80 Q410,105 440,80 Q470,55 500,80" fill="none" stroke="#7c3aed" stroke-width="2" stroke-dasharray="6 4" opacity="0.5"/>
+    <text x="350" y="145" text-anchor="middle" font-size="11" fill="#7c3aed" font-weight="600">Kármán vortex street (Re ≈ 90)</text>
+    <text x="40" y="22" font-size="10" fill="#3b82f6" font-weight="600">Inlet U = 0.1</text>
+    <text x="530" y="22" font-size="10" fill="#059669" font-weight="600">Outlet</text>
+    <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#3b82f6" stroke-width="1.5"/></marker></defs>
+  </svg>
+</div>
+
+<!-- ═══════════════ NS vs LBM ═══════════════ -->
+<section>
+  <div class="section-label red">The Problem</div>
+  <h2>Two ways to simulate fluid flow</h2>
+  <p>Traditional CFD solves the Navier-Stokes equations directly — partial differential equations that describe how velocity, pressure, and density change over time. This is mathematically elegant but computationally expensive: you need to solve coupled, nonlinear PDEs, often requiring implicit solvers and iterative pressure correction.</p>
+  <p>The Lattice Boltzmann Method takes a completely different approach. Instead of solving macroscopic equations, it simulates the behaviour of fictitious particle populations bouncing around on a discrete grid. Density and velocity emerge naturally as statistical averages. The Chapman-Enskog expansion proves that this recovers the incompressible Navier-Stokes equations in the limit.</p>
+
+  <div class="vs-row">
+    <div class="vs-card left">
+      <span class="tag">Traditional CFD</span>
+      <h3>Navier-Stokes (macroscopic)</h3>
+      <ul>
+        <li>Solve coupled PDEs for velocity and pressure</li>
+        <li>Needs pressure-velocity coupling (SIMPLE, etc.)</li>
+        <li>Implicit solvers, matrix inversions</li>
+        <li>Complex boundary handling</li>
+        <li>Hard to parallelise (global pressure solve)</li>
+      </ul>
+    </div>
+    <div class="vs-divider"><span>vs</span></div>
+    <div class="vs-card right">
+      <span class="tag">Lattice Boltzmann (mesoscopic)</span>
+      <h3>D2Q9-BGK</h3>
+      <ul>
+        <li>Track 9 particle distributions per cell</li>
+        <li>No pressure equation needed</li>
+        <li>Explicit time stepping, no matrix solves</li>
+        <li>Simple bounce-back for solid walls</li>
+        <li>Naturally parallel (local operations)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ D2Q9 MODEL ═══════════════ -->
+<section>
+  <div class="section-label blue">The Model</div>
+  <h2>D2Q9 — 2 dimensions, 9 velocities</h2>
+  <p>Each cell on the 600×200 grid holds <strong>9 distribution functions</strong> (f₀ through f₈). Each one represents how much fluid is moving in that direction. The weights reflect how likely each direction is at thermodynamic equilibrium.</p>
+
+  <div class="diagram">
+    <svg width="280" height="280" viewBox="0 0 280 280">
+      <!-- grid lines -->
+      <rect x="40" y="40" width="200" height="200" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+      <!-- center cell -->
+      <circle cx="140" cy="140" r="14" fill="#2563eb"/>
+      <text x="140" y="144" text-anchor="middle" fill="#fff" font-size="10" font-weight="700">f₀</text>
+      <!-- cardinal arrows -->
+      <g fill="none" stroke="#2563eb" stroke-width="2.5">
+        <line x1="158" y1="140" x2="210" y2="140"/><circle cx="214" cy="140" r="3" fill="#2563eb"/>
+        <line x1="122" y1="140" x2="70" y2="140"/><circle cx="66" cy="140" r="3" fill="#2563eb"/>
+        <line x1="140" y1="122" x2="140" y2="70"/><circle cx="140" cy="66" r="3" fill="#2563eb"/>
+        <line x1="140" y1="158" x2="140" y2="210"/><circle cx="140" cy="214" r="3" fill="#2563eb"/>
+      </g>
+      <!-- diagonal arrows -->
+      <g fill="none" stroke="#7c3aed" stroke-width="2">
+        <line x1="153" y1="127" x2="196" y2="84"/><circle cx="199" cy="81" r="3" fill="#7c3aed"/>
+        <line x1="127" y1="127" x2="84" y2="84"/><circle cx="81" cy="81" r="3" fill="#7c3aed"/>
+        <line x1="127" y1="153" x2="84" y2="196"/><circle cx="81" cy="199" r="3" fill="#7c3aed"/>
+        <line x1="153" y1="153" x2="196" y2="196"/><circle cx="199" cy="199" r="3" fill="#7c3aed"/>
+      </g>
+      <!-- labels -->
+      <text x="224" y="144" font-size="12" font-weight="700" fill="#2563eb">f₁ (1/9)</text>
+      <text x="140" y="58" text-anchor="middle" font-size="12" font-weight="700" fill="#2563eb">f₂ (1/9)</text>
+      <text x="10" y="144" font-size="12" font-weight="700" fill="#2563eb">f₃ (1/9)</text>
+      <text x="140" y="234" text-anchor="middle" font-size="12" font-weight="700" fill="#2563eb">f₄ (1/9)</text>
+      <text x="206" y="76" font-size="11" font-weight="600" fill="#7c3aed">f₅ (1/36)</text>
+      <text x="10" y="76" font-size="11" font-weight="600" fill="#7c3aed">f₆ (1/36)</text>
+      <text x="10" y="214" font-size="11" font-weight="600" fill="#7c3aed">f₇ (1/36)</text>
+      <text x="206" y="214" font-size="11" font-weight="600" fill="#7c3aed">f₈ (1/36)</text>
+      <!-- center weight -->
+      <text x="140" y="166" text-anchor="middle" font-size="10" fill="#64748b">rest: w = 4/9</text>
+    </svg>
+    <div class="caption">The D2Q9 velocity model. Cardinal directions get weight 1/9, diagonals 1/36, rest 4/9.</div>
+  </div>
+</section>
+
+<!-- ═══════════════ ALGORITHM STEPS ═══════════════ -->
+<section>
+  <div class="section-label green">The Algorithm</div>
+  <h2>What happens each timestep</h2>
+  <p>The simulation runs this 6-step cycle 10,000 times. Each step operates on the same 600×200 grid of cells. The heavy computation is in steps 1–3; steps 4–5 are cheap boundary fixes; step 6 is just a pointer swap.</p>
+
+  <div style="margin-top:2rem">
+
+    <!-- STEP 1 -->
+    <div class="step">
+      <div class="step-num s1">1</div>
+      <div class="step-body">
+        <h3>Compute density and velocity</h3>
+        <div class="what">What does this cell's collection of particles mean physically?</div>
+        <p>Sum all 9 distributions to get density (ρ). Weight each by its direction to get momentum, then divide by ρ to get velocity (u<sub>x</sub>, u<sub>y</sub>). If East=20 and West=5, more fluid is heading right, so u<sub>x</sub> is positive.</p>
+        <div class="code-box"><span class="cm">// For each cell (x, y):</span>
+ρ = f₀ + f₁ + f₂ + ... + f₈
+u<sub>x</sub> = (f₁ - f₃ + f₅ - f₇ + f₈ - f₆) / ρ
+u<sub>y</sub> = (f₂ - f₄ + f₅ - f₇ + f₆ - f₈) / ρ</div>
+        <p style="font-size:0.85rem;color:#2563eb;font-weight:600">⬡ Purely local — each cell reads only its own data. No neighbours needed.</p>
+      </div>
+    </div>
+
+    <!-- STEP 2 -->
+    <div class="step">
+      <div class="step-num s2">2</div>
+      <div class="step-body">
+        <h3>Collision (BGK relaxation)</h3>
+        <div class="what">Particles inside the cell bump into each other and try to reach equilibrium.</div>
+        <p>Each distribution is nudged toward the equilibrium value (what thermodynamics says it "should" be at this density and velocity). The parameter τ = 0.6 controls how fast this happens. Lower τ means lower viscosity means more turbulent flow.</p>
+        <div class="code-box"><span class="cm">// BGK operator — relax toward equilibrium</span>
+f[i] = f[i] − (<span class="val">1/τ</span>) × (f[i] − f<sub>eq</sub>[i])
+
+<span class="cm">// where f_eq depends on current ρ, u_x, u_y:</span>
+f<sub>eq</sub>[i] = w[i] × ρ × (1 + 3(e·u) + 4.5(e·u)² − 1.5|u|²)</div>
+        <p style="font-size:0.85rem;color:#d97706;font-weight:600">⬡ Still purely local — nothing moves to neighbours yet.</p>
+      </div>
+    </div>
+
+    <!-- STEP 3 -->
+    <div class="step">
+      <div class="step-num s3">3</div>
+      <div class="step-body">
+        <h3>Streaming (particles travel)</h3>
+        <div class="what">Each distribution hops one cell in its direction.</div>
+        <p>This is where fluid information actually moves between cells. The code uses <strong>pull-style</strong>: instead of pushing particles out, each cell asks "who was upstream?" and pulls from there. The result goes into a separate buffer (fnew) so reads and writes don't collide.</p>
+        <div class="diagram">
+          <svg width="360" height="120" viewBox="0 0 360 120">
+            <rect x="40" y="30" width="80" height="60" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+            <text x="80" y="55" text-anchor="middle" font-size="11" font-weight="600" fill="#2563eb">Cell A</text>
+            <text x="80" y="70" text-anchor="middle" font-size="10" fill="#3b82f6">f₁ = 10 →</text>
+            <rect x="200" y="30" width="80" height="60" rx="8" fill="#faf5ff" stroke="#7c3aed" stroke-width="1.5"/>
+            <text x="240" y="55" text-anchor="middle" font-size="11" font-weight="600" fill="#7c3aed">Cell B</text>
+            <text x="240" y="70" text-anchor="middle" font-size="10" fill="#7c3aed">pulls f₁</text>
+            <path d="M125 60 L192 60" fill="none" stroke="#7c3aed" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#ap)"/>
+            <text x="158" y="52" text-anchor="middle" font-size="9" fill="#64748b">pull</text>
+            <defs><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="#7c3aed" stroke-width="1.5"/></marker></defs>
+          </svg>
+          <div class="caption">Pull-style streaming: Cell B reads from Cell A. Each cell only writes to itself.</div>
+        </div>
+        <p>If the upstream cell is solid (part of the cylinder), the particle bounces back instead — its direction gets reversed. This creates a no-slip wall where velocity equals zero at the surface.</p>
+        <p style="font-size:0.85rem;color:#7c3aed;font-weight:600">⬡ Reads 8 neighbours — this is the stencil step. The key target for parallelisation.</p>
+      </div>
+    </div>
+
+    <!-- STEP 4 -->
+    <div class="step">
+      <div class="step-num s4">4</div>
+      <div class="step-body">
+        <h3>Inlet boundary (Zou-He)</h3>
+        <div class="what">Force velocity = 0.1 at the left wall.</div>
+        <p>At x = 0, the simulation prescribes u<sub>x</sub> = U_INLET and analytically computes the three unknown incoming distributions (f₁, f₅, f₈). Without this, the fluid would eventually stop flowing.</p>
+        <p style="font-size:0.85rem;color:#dc2626;font-weight:600">⬡ Only touches one column (x = 0). Very cheap.</p>
+      </div>
+    </div>
+
+    <!-- STEP 5 -->
+    <div class="step">
+      <div class="step-num s5">5</div>
+      <div class="step-body">
+        <h3>Outlet boundary (zero-gradient)</h3>
+        <div class="what">Let fluid flow out smoothly at the right wall.</div>
+        <p>At x = NX−1, all 9 distributions are copied from the second-to-last column. This prevents reflections at the boundary.</p>
+        <p style="font-size:0.85rem;color:#059669;font-weight:600">⬡ Only touches one column (x = NX−1). Also very cheap.</p>
+      </div>
+    </div>
+
+    <!-- STEP 6 -->
+    <div class="step">
+      <div class="step-num s6">6</div>
+      <div class="step-body">
+        <h3>Swap buffers</h3>
+        <div class="what">fnew becomes the current state for the next timestep.</div>
+        <p>Just swap two pointers. No data is copied — only two pointer values trade places. Then the cycle repeats.</p>
+        <p style="font-size:0.85rem;color:#475569;font-weight:600">⬡ One pointer swap. Zero cost.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-box f1">1. Density & velocity from f</div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box f2">2. Collision — relax toward equilibrium</div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box f3">3. Stream — particles move to neighbours</div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box f4">4 & 5. Fix inlet and outlet boundaries</div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box f6">6. Swap f ↔ fnew, repeat ×10,000</div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box f5">Vortex street emerges ✓</div>
+  </div>
+</section>
+
+<!-- ═══════════════ PARALLELISATION ═══════════════ -->
+<section>
+  <div class="section-label purple">Parallelisation</div>
+  <h2>Three ways to run it faster</h2>
+  <p>Steps 1 and 2 are embarrassingly parallel — every cell is independent, no data conflicts. Step 3 reads neighbours (a stencil) but each cell writes only to its own location. This structure maps cleanly to all three parallel paradigms.</p>
+
+  <div class="par-grid">
+    <div class="par-card omp">
+      <span class="icon">🧵</span>
+      <span class="par-tag" style="background:#fde68a;color:#92400e">Shared Memory</span>
+      <h3>OpenMP</h3>
+      <p>Add <code>#pragma omp parallel for collapse(2)</code> to the 3 heavy loops. All threads share the same arrays. 7 lines added to serial code. Peak: <strong>57.6 MLUPS</strong> at 8 threads (2.6× speedup).</p>
+    </div>
+    <div class="par-card mpi">
+      <span class="icon">📨</span>
+      <span class="par-tag" style="background:#bfdbfe;color:#1e40af">Distributed Memory</span>
+      <h3>MPI</h3>
+      <p>Split the 600 columns across processes. Each gets a strip + 2 ghost columns. Exchange boundary data with <code>MPI_Sendrecv</code> after collision. Peak: <strong>44.5 MLUPS</strong> at 4 procs (1.4× speedup).</p>
+    </div>
+    <div class="par-card cuda">
+      <span class="icon">⚡</span>
+      <span class="par-tag" style="background:#ddd6fe;color:#5b21b6">GPU</span>
+      <h3>CUDA</h3>
+      <p>One thread per cell. 2D grid of 16×16 blocks. 5 kernels per timestep. Data stays on GPU; only copied back every 100 steps for output. Peak: <strong>70.8 MLUPS</strong> (3.2× speedup).</p>
+    </div>
+  </div>
+
+  <!-- OpenMP detail -->
+  <div style="margin:2rem 0">
+    <h3 style="color:#d97706">OpenMP — what changes</h3>
+    <p>The serial loops over (x, y) get a single pragma. collapse(2) flattens 600×200 into 120,000 iterations. Static schedule because every cell does the same work. No reductions, no critical sections — each cell writes to its own spot.</p>
+    <div class="code-box"><span class="kw">#pragma omp parallel for collapse(2) schedule(static)</span>
+<span class="kw">for</span> (int x = 0; x < NX; x++)
+    <span class="kw">for</span> (int y = 0; y < NY; y++) {
+        <span class="cm">// compute rho, ux, uy from f[x][y]</span>
+        <span class="cm">// each thread writes ONLY to its own (x,y)</span>
+    }</div>
+  </div>
+
+  <!-- MPI detail -->
+  <div style="margin:2rem 0">
+    <h3 style="color:#2563eb">MPI — domain decomposition + halo exchange</h3>
+    <p>The grid is split along x. With 4 processes, each gets 150 columns plus 2 ghost columns for neighbour data. After collision, one MPI_Sendrecv sends the rightmost column to the right neighbour and receives the left ghost from the left neighbour. A second call does the reverse.</p>
+    <div class="diagram">
+      <svg width="520" height="100" viewBox="0 0 520 100">
+        <rect x="10" y="20" width="120" height="60" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+        <text x="70" y="48" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">Rank 0</text>
+        <text x="70" y="64" text-anchor="middle" font-size="9" fill="#3b82f6">cols 0–149</text>
+        <rect x="140" y="20" width="120" height="60" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+        <text x="200" y="48" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">Rank 1</text>
+        <text x="200" y="64" text-anchor="middle" font-size="9" fill="#3b82f6">cols 150–299</text>
+        <rect x="270" y="20" width="120" height="60" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+        <text x="330" y="48" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">Rank 2</text>
+        <text x="330" y="64" text-anchor="middle" font-size="9" fill="#3b82f6">cols 300–449</text>
+        <rect x="400" y="20" width="120" height="60" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+        <text x="460" y="48" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">Rank 3</text>
+        <text x="460" y="64" text-anchor="middle" font-size="9" fill="#3b82f6">cols 450–599</text>
+        <!-- halo arrows -->
+        <path d="M130 38 L140 38" stroke="#ef4444" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M140 62 L130 62" stroke="#ef4444" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M260 38 L270 38" stroke="#ef4444" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M270 62 L260 62" stroke="#ef4444" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M390 38 L400 38" stroke="#ef4444" stroke-width="2.5" marker-end="url(#ar)"/>
+        <path d="M400 62 L390 62" stroke="#ef4444" stroke-width="2.5" marker-end="url(#ar)"/>
+        <text x="265" y="14" text-anchor="middle" font-size="9" fill="#ef4444" font-weight="600">← halo exchange (MPI_Sendrecv) →</text>
+        <defs><marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M2 2L8 5L2 8" fill="#ef4444"/></marker></defs>
+      </svg>
+      <div class="caption">1D decomposition with 4 ranks. Red arrows show ghost column exchanges after collision.</div>
+    </div>
+  </div>
+
+  <!-- CUDA detail -->
+  <div style="margin:2rem 0">
+    <h3 style="color:#7c3aed">CUDA — one thread per cell, five kernels per timestep</h3>
+    <p>The 600×200 grid maps to a 2D CUDA grid. Each thread computes one cell using blockIdx and threadIdx. Five separate kernels run per timestep because threads in different blocks cannot synchronise within a single kernel. Launching a new kernel is the only global barrier available.</p>
+    <div class="code-box"><span class="kw">dim3</span> block(<span class="val">16</span>, <span class="val">16</span>);         <span class="cm">// 256 threads per block</span>
+<span class="kw">dim3</span> grid((<span class="val">600</span>+15)/16, (<span class="val">200</span>+15)/16);  <span class="cm">// enough blocks to cover grid</span>
+
+<span class="kw">for</span> (t = 1; t <= 10000; t++) {
+    <span class="fn">macroscopic_kernel</span><<<grid, block>>>(d_f, d_rho, d_ux, d_uy, ...);
+    <span class="fn">collision_kernel</span><<<grid, block>>>(d_f, d_rho, d_ux, d_uy, ...);
+    <span class="fn">streaming_kernel</span><<<grid, block>>>(d_f, d_fnew, ...);
+    <span class="fn">inlet_kernel</span><<<bc_blocks, 256>>>(d_fnew, ...);
+    <span class="fn">outlet_kernel</span><<<bc_blocks, 256>>>(d_fnew, ...);
+    swap(d_f, d_fnew);  <span class="cm">// pointer swap, no data copy</span>
+}</div>
+  </div>
+</section>
+
+<!-- ═══════════════ FOOTER ═══════════════ -->
+<div class="footer">
+  SE3082 – Parallel Computing | Sandali Sandagomi | SLIIT 2026
+</div>
+
+</body>
+</html>
