@@ -30,6 +30,16 @@
 #include <string.h>
 #include <math.h>
 #include <mpi.h>
+#ifdef _WIN32
+#  include <direct.h>
+#  define MKDIR(d) _mkdir(d)
+#else
+#  include <sys/stat.h>
+#  define MKDIR(d) mkdir((d), 0755)
+#endif
+
+#define FRAMES_DIR     "frames/mpi"
+#define FRAMES_PPM_DIR "frames/mpi_ppm"
 
 /* ------------------------------------------------------------------ */
 /* Simulation parameters                                              */
@@ -83,8 +93,8 @@ static void save_pgm(int step,
                      const double *ux_full, const double *uy_full,
                      const int    *obs_full)
 {
-    char fname[64];
-    snprintf(fname, sizeof(fname), "frame_%05d.pgm", step);
+    char fname[80];
+    snprintf(fname, sizeof(fname), FRAMES_DIR "/frame_%05d.pgm", step);
     FILE *fp = fopen(fname, "wb");
     if (!fp) { perror(fname); return; }
 
@@ -113,6 +123,62 @@ static void save_pgm(int step,
     fclose(fp);
 }
 
+/* ------------------------------------------------------------------ */
+/* Save vorticity field as color PPM — called on rank 0 with full     */
+/* domain arrays gathered via MPI_Gatherv.                            */
+/* ------------------------------------------------------------------ */
+static void save_ppm_vorticity(int step,
+                               const double *ux_full, const double *uy_full,
+                               const int    *obs_full)
+{
+    char fname[80];
+    snprintf(fname, sizeof(fname), FRAMES_PPM_DIR "/frame_%05d.ppm", step);
+    FILE *fp = fopen(fname, "wb");
+    if (!fp) { perror(fname); return; }
+
+    double *omega = (double *)malloc(NX * NY * sizeof(double));
+    if (!omega) { fclose(fp); return; }
+
+    double omax = 1e-12;
+    for (int x = 0; x < NX; x++) {
+        for (int y = 0; y < NY; y++) {
+            int c = x * NY + y;
+            if (obs_full[c]) { omega[c] = 0.0; continue; }
+            int xp = (x < NX-1) ? x+1 : x,  xm = (x > 0) ? x-1 : x;
+            int yp = (y < NY-1) ? y+1 : y,  ym = (y > 0) ? y-1 : y;
+            double w = (uy_full[xp*NY+y] - uy_full[xm*NY+y]) / (double)(xp - xm)
+                     - (ux_full[x*NY+yp] - ux_full[x*NY+ym]) / (double)(yp - ym);
+            omega[c] = w;
+            if (fabs(w) > omax) omax = fabs(w);
+        }
+    }
+
+    fprintf(fp, "P6\n%d %d\n255\n", NX, NY);
+    for (int y = NY-1; y >= 0; y--) {
+        for (int x = 0; x < NX; x++) {
+            int c = x * NY + y;
+            unsigned char r, g, b;
+            if (obs_full[c]) {
+                r = g = b = 30;
+            } else {
+                double t = omega[c] / omax;
+                if (t >= 0.0) {
+                    r = 255;
+                    g = (unsigned char)(255.0 * (1.0 - t));
+                    b = (unsigned char)(255.0 * (1.0 - t));
+                } else {
+                    r = (unsigned char)(255.0 * (1.0 + t));
+                    g = (unsigned char)(255.0 * (1.0 + t));
+                    b = 255;
+                }
+            }
+            fputc(r, fp); fputc(g, fp); fputc(b, fp);
+        }
+    }
+    free(omega);
+    fclose(fp);
+}
+
 /* ================================================================== */
 /* Main                                                               */
 /* ================================================================== */
@@ -122,6 +188,13 @@ int main(int argc, char **argv) {
     int rank, nprocs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+
+    if (rank == 0) {
+        MKDIR("frames");
+        MKDIR(FRAMES_DIR);
+        MKDIR(FRAMES_PPM_DIR);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);   /* ensure dirs exist before any rank runs */
 
     /* -------------------------------------------------------------- */
     /* 1D domain decomposition along x.                               */
@@ -449,6 +522,7 @@ int main(int argc, char **argv) {
 
             if (rank == 0) {
                 save_pgm(t, ux_full, uy_full, obs_full);
+                save_ppm_vorticity(t, ux_full, uy_full, obs_full);
                 printf("  step %5d / %d  saved frame\n", t, NSTEPS);
                 fflush(stdout);
             }
