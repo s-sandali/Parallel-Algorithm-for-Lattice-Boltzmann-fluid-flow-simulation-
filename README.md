@@ -147,21 +147,21 @@ nvcc -O3 -o lbm_cuda lbm_cuda.cu -lm
 ```
 
 ### OpenMP — set thread count via environment variable
-```powershell
-$env:OMP_NUM_THREADS=1;  ./lbm_openmp
-$env:OMP_NUM_THREADS=2;  ./lbm_openmp
-$env:OMP_NUM_THREADS=4;  ./lbm_openmp
-$env:OMP_NUM_THREADS=8;  ./lbm_openmp
-$env:OMP_NUM_THREADS=16; ./lbm_openmp
+```bash
+OMP_NUM_THREADS=1  ./lbm_openmp
+OMP_NUM_THREADS=2  ./lbm_openmp
+OMP_NUM_THREADS=4  ./lbm_openmp
+OMP_NUM_THREADS=8  ./lbm_openmp
+OMP_NUM_THREADS=16 ./lbm_openmp
 ```
 
 ### MPI — vary number of processes
-```powershell
-mpiexec -n 1  ./lbm_mpi
-mpiexec -n 2  ./lbm_mpi
-mpiexec -n 4  ./lbm_mpi
-mpiexec -n 8  ./lbm_mpi
-mpiexec -n 16 ./lbm_mpi
+```bash
+mpirun -n 1  ./lbm_mpi
+mpirun -n 2  ./lbm_mpi
+mpirun -n 4  ./lbm_mpi
+mpirun -n 8  ./lbm_mpi
+mpirun -n 16 ./lbm_mpi
 ```
 
 ### CUDA — default block size (16×16), or specify custom
