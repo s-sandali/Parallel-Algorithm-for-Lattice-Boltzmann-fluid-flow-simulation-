@@ -1,50 +1,14 @@
-/*
- * lbm_cuda.cu
- *
- * CUDA-parallelised D2Q9-BGK Lattice Boltzmann Method:
- * 2D incompressible flow past a circular cylinder.
- *
- * Parallelisation strategy:
- *   - The 600x200 lattice maps naturally to a 2D CUDA grid.
- *     Each thread handles one lattice cell (x, y).
- *     Block size is configurable (default 16x16 = 256 threads per block);
- *     the grid dimensions are computed to cover the full lattice.
- *   - Three main GPU kernels run each timestep:
- *       1. macroscopic_kernel  — compute rho, ux, uy from f  (purely local)
- *       2. collision_kernel    — BGK relaxation of f          (purely local)
- *       3. streaming_kernel    — pull-style streaming + bounce-back (stencil)
- *     Two small kernels handle boundary conditions:
- *       4. inlet_kernel        — Zou-He velocity inlet at x = 0
- *       5. outlet_kernel       — zero-gradient outlet at x = NX-1
- *   - D2Q9 lattice constants (ex, ey, w_, opp) are stored in CUDA
- *     __constant__ memory — read-only, cached, and broadcast to all threads.
- *   - All data arrays live on the GPU for the entire simulation.  Data is
- *     only copied back to the host every OUTPUT_INTERVAL steps for PGM output.
- *   - Timing uses CUDA events for accurate GPU-side measurement.
- *
- * Build:   nvcc -O3 -o lbm_cuda lbm_cuda.cu -lm
- * Run:     ./lbm_cuda
- *          ./lbm_cuda 32 32        (custom block size, e.g. 32x32)
- *
- * References (algorithmic only; this code is original):
- *   - Mocz (2020), Palabos LBM codes, Krüger et al. (2017).
- */
 
+#include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <sys/stat.h>
 
-/* ------------------------------------------------------------------ */
-/* Output directories (matching OpenMP structure)                     */
-/* ------------------------------------------------------------------ */
 #define FRAMES_DIR      "frames/cuda"
 #define FRAMES_PPM_DIR  "frames/cuda_ppm"
 
-/* ------------------------------------------------------------------ */
-/* Simulation parameters                                              */
-/* ------------------------------------------------------------------ */
 #define NX               600
 #define NY               200
 #define NSTEPS           10000
@@ -57,14 +21,9 @@
 #define CYL_Y            (NY/2)
 #define CYL_R            15
 
-/* Default block dimensions (can be overridden via command-line args) */
 #define DEFAULT_BX       16
 #define DEFAULT_BY       16
 
-/* ------------------------------------------------------------------ */
-/* CUDA error-checking macro (from lecture notes)                     */
-/* Kernel launches fail SILENTLY without this.                        */
-/* ------------------------------------------------------------------ */
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = (call); \
@@ -75,17 +34,13 @@
         } \
     } while (0)
 
-/* ------------------------------------------------------------------ */
-/* D2Q9 lattice constants in CUDA __constant__ memory.                */
-/* __constant__ is cached, read-only memory that is broadcast to all  */
-/* threads in a warp — ideal for small lookup tables like these.      */
-/* ------------------------------------------------------------------ */
+/* D2Q9 constants in __constant__ memory (cached, broadcast to all threads in a warp) */
 __constant__ int    d_ex[9];
 __constant__ int    d_ey[9];
 __constant__ double d_w[9];
 __constant__ int    d_opp[9];
 
-/* Host copies for initialisation and output */
+/* host copies for initialisation */
 static const int    h_ex[9]  = {  0,  1,  0, -1,  0,  1, -1, -1,  1 };
 static const int    h_ey[9]  = {  0,  0,  1,  0, -1,  1,  1, -1, -1 };
 static const double h_w[9]   = { 4.0/9.0,
@@ -93,9 +48,6 @@ static const double h_w[9]   = { 4.0/9.0,
                                   1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0 };
 static const int    h_opp[9] = { 0, 3, 4, 1, 2, 7, 8, 5, 6 };
 
-/* ------------------------------------------------------------------ */
-/* Index helpers — __host__ __device__ so usable on both CPU and GPU  */
-/* ------------------------------------------------------------------ */
 __host__ __device__ static inline int idx_f(int x, int y, int i) {
     return ((x * NY) + y) * 9 + i;
 }
@@ -103,37 +55,26 @@ __host__ __device__ static inline int idx_c(int x, int y) {
     return x * NY + y;
 }
 
-/* ------------------------------------------------------------------ */
-/* Device: equilibrium distribution                                   */
-/* ------------------------------------------------------------------ */
 __device__ static inline double feq_i(int i, double rho, double ux, double uy) {
     double cu  = 3.0 * (d_ex[i]*ux + d_ey[i]*uy);
     double usq = 1.5 * (ux*ux + uy*uy);
     return d_w[i] * rho * (1.0 + cu + 0.5*cu*cu - usq);
 }
 
-/* Host version for initialisation */
 static inline double feq_i_host(int i, double rho, double ux, double uy) {
     double cu  = 3.0 * (h_ex[i]*ux + h_ey[i]*uy);
     double usq = 1.5 * (ux*ux + uy*uy);
     return h_w[i] * rho * (1.0 + cu + 0.5*cu*cu - usq);
 }
 
-/* ================================================================== */
-/* GPU KERNELS                                                        */
-/* ================================================================== */
-
-/* ------------------------------------------------------------------ *
- * Kernel 1: compute macroscopic variables (density, velocity).       *
- * Each thread handles one cell — purely local, no neighbour access.  *
- * ------------------------------------------------------------------ */
+/* kernel 1: macroscopic variables */
 __global__ void macroscopic_kernel(const double *f, double *rho,
                                    double *ux, double *uy,
                                    const int *obstacle)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= NX || y >= NY) return;   /* boundary check */
+    if (x >= NX || y >= NY) return;
 
     int c = idx_c(x, y);
     double r = 0.0, mx = 0.0, my = 0.0;
@@ -149,10 +90,7 @@ __global__ void macroscopic_kernel(const double *f, double *rho,
     if (obstacle[c]) { ux[c] = 0.0; uy[c] = 0.0; }
 }
 
-/* ------------------------------------------------------------------ *
- * Kernel 2: BGK collision — relax each cell's f toward equilibrium.  *
- * Purely local: reads rho/ux/uy computed in kernel 1, modifies f.    *
- * ------------------------------------------------------------------ */
+/* kernel 2: BGK collision */
 __global__ void collision_kernel(double *f, const double *rho,
                                  const double *ux, const double *uy,
                                  const int *obstacle)
@@ -172,11 +110,7 @@ __global__ void collision_kernel(double *f, const double *rho,
     }
 }
 
-/* ------------------------------------------------------------------ *
- * Kernel 3: streaming with bounce-back.                              *
- * Pull-style: thread at (x,y) reads from neighbour (x-ex, y-ey).    *
- * Each thread writes only to its own location in fnew — no conflicts.*
- * ------------------------------------------------------------------ */
+/* kernel 3: streaming + bounce-back (pull-style) */
 __global__ void streaming_kernel(const double *f, double *fnew,
                                   const int *obstacle)
 {
@@ -194,7 +128,6 @@ __global__ void streaming_kernel(const double *f, double *fnew,
         int xs = x - d_ex[i];
         int ys = y - d_ey[i];
 
-        /* periodic wrap in x */
         if (xs < 0)    xs += NX;
         if (xs >= NX)  xs -= NX;
 
@@ -211,13 +144,10 @@ __global__ void streaming_kernel(const double *f, double *fnew,
     }
 }
 
-/* ------------------------------------------------------------------ *
- * Kernel 4: Zou-He velocity inlet at x = 0.                         *
- * 1D kernel — one thread per y row (y = 1..NY-2).                   *
- * ------------------------------------------------------------------ */
+/* kernel 4: Zou-He velocity inlet at x = 0 (1D kernel over y) */
 __global__ void inlet_kernel(double *fnew, const int *obstacle)
 {
-    int y = blockIdx.x * blockDim.x + threadIdx.x + 1;  /* y from 1 to NY-2 */
+    int y = blockIdx.x * blockDim.x + threadIdx.x + 1;
     if (y >= NY - 1) return;
 
     int c = idx_c(0, y);
@@ -237,10 +167,7 @@ __global__ void inlet_kernel(double *fnew, const int *obstacle)
     fnew[idx_f(0, y, 8)] = f6 + 0.5*(f2 - f4) + (1.0/6.0) * rho_in * U_INLET;
 }
 
-/* ------------------------------------------------------------------ *
- * Kernel 5: zero-gradient outlet at x = NX-1.                       *
- * 1D kernel — copies from x=NX-2 to x=NX-1.                        *
- * ------------------------------------------------------------------ */
+/* kernel 5: zero-gradient outlet at x = NX-1 (1D kernel over y) */
 __global__ void outlet_kernel(double *fnew, const int *obstacle)
 {
     int y = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -254,9 +181,6 @@ __global__ void outlet_kernel(double *fnew, const int *obstacle)
     }
 }
 
-/* ================================================================== */
-/* HOST: PGM and PPM output (identical to OpenMP version)             */
-/* ================================================================== */
 static void save_pgm(int step,
                      const double *ux, const double *uy,
                      const int    *obstacle)
@@ -291,6 +215,7 @@ static void save_pgm(int step,
     fclose(fp);
 }
 
+/* vorticity: omega = duy/dx - dux/dy, mapped red/white/blue */
 static void save_ppm_vorticity(int step,
                                const double *ux, const double *uy,
                                const int    *obstacle)
@@ -338,17 +263,24 @@ static void save_ppm_vorticity(int step,
     fclose(fp);
 }
 
-/* ================================================================== */
-/* Main                                                               */
-/* ================================================================== */
 int main(int argc, char **argv) {
-    /* Create output directories */
+    /* all declarations at the top */
+    int    bx = DEFAULT_BX, by = DEFAULT_BY;
+    size_t Ncells = (size_t)NX * NY;
+    size_t Nf     = Ncells * 9;
+    double *h_f, *h_rho, *h_ux, *h_uy;
+    int    *h_obstacle;
+    double *d_f, *d_fnew, *d_rho, *d_ux, *d_uy;
+    int    *d_obstacle;
+    int    bc_threads, bc_blocks;
+    float  elapsed_ms;
+    double elapsed, mlups;
+    cudaEvent_t ev_start, ev_stop;
+
     mkdir("frames", 0755);
     mkdir(FRAMES_DIR, 0755);
     mkdir(FRAMES_PPM_DIR, 0755);
 
-    /* Parse optional block size from command line */
-    int bx = DEFAULT_BX, by = DEFAULT_BY;
     if (argc >= 3) {
         bx = atoi(argv[1]);
         by = atoi(argv[2]);
@@ -359,25 +291,16 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* -------------------------------------------------------------- */
-    /* Copy D2Q9 constants to GPU __constant__ memory                 */
-    /* -------------------------------------------------------------- */
     CUDA_CHECK(cudaMemcpyToSymbol(d_ex,  h_ex,  9 * sizeof(int)));
     CUDA_CHECK(cudaMemcpyToSymbol(d_ey,  h_ey,  9 * sizeof(int)));
     CUDA_CHECK(cudaMemcpyToSymbol(d_w,   h_w,   9 * sizeof(double)));
     CUDA_CHECK(cudaMemcpyToSymbol(d_opp, h_opp, 9 * sizeof(int)));
 
-    /* -------------------------------------------------------------- */
-    /* Host allocation and initialisation                             */
-    /* -------------------------------------------------------------- */
-    size_t Ncells = (size_t)NX * NY;
-    size_t Nf     = Ncells * 9;
-
-    double *h_f        = (double *)malloc(Nf     * sizeof(double));
-    double *h_rho      = (double *)malloc(Ncells * sizeof(double));
-    double *h_ux       = (double *)malloc(Ncells * sizeof(double));
-    double *h_uy       = (double *)malloc(Ncells * sizeof(double));
-    int    *h_obstacle = (int    *)malloc(Ncells * sizeof(int));
+    h_f        = (double *)malloc(Nf     * sizeof(double));
+    h_rho      = (double *)malloc(Ncells * sizeof(double));
+    h_ux       = (double *)malloc(Ncells * sizeof(double));
+    h_uy       = (double *)malloc(Ncells * sizeof(double));
+    h_obstacle = (int    *)malloc(Ncells * sizeof(int));
 
     for (int x = 0; x < NX; x++)
         for (int y = 0; y < NY; y++) {
@@ -393,12 +316,6 @@ int main(int argc, char **argv) {
                 h_f[idx_f(x, y, i)] = feq_i_host(i, h_rho[c], h_ux[c], h_uy[c]);
         }
 
-    /* -------------------------------------------------------------- */
-    /* Device allocation (Step 2 from lecture workflow)                */
-    /* -------------------------------------------------------------- */
-    double *d_f, *d_fnew, *d_rho, *d_ux, *d_uy;
-    int    *d_obstacle;
-
     CUDA_CHECK(cudaMalloc(&d_f,        Nf     * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_fnew,     Nf     * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_rho,      Ncells * sizeof(double)));
@@ -406,26 +323,18 @@ int main(int argc, char **argv) {
     CUDA_CHECK(cudaMalloc(&d_uy,       Ncells * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_obstacle, Ncells * sizeof(int)));
 
-    /* -------------------------------------------------------------- */
-    /* Copy initial data host → device (Step 3 from lecture workflow)  */
-    /* -------------------------------------------------------------- */
     CUDA_CHECK(cudaMemcpy(d_f,        h_f,        Nf     * sizeof(double),
                           cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_obstacle, h_obstacle, Ncells * sizeof(int),
                           cudaMemcpyHostToDevice));
-    /* d_fnew is only written by the streaming kernel, no init needed */
 
-    /* -------------------------------------------------------------- */
-    /* Kernel launch configuration                                    */
-    /* 2D grid: one thread per cell, block size bx × by.              */
-    /* Grid dimensions are ceil(NX/bx) × ceil(NY/by) blocks.          */
-    /* -------------------------------------------------------------- */
+    /* 2D grid: one thread per cell */
     dim3 block2D(bx, by);
     dim3 grid2D((NX + bx - 1) / bx, (NY + by - 1) / by);
 
-    /* 1D grid for boundary kernels (NY-2 threads for y=1..NY-2) */
-    int bc_threads = 256;
-    int bc_blocks  = (NY - 2 + bc_threads - 1) / bc_threads;
+    /* 1D grid for boundary kernels (y = 1..NY-2) */
+    bc_threads = 256;
+    bc_blocks  = (NY - 2 + bc_threads - 1) / bc_threads;
 
     printf("D2Q9-BGK LBM CUDA: %dx%d lattice, %d steps, tau=%.2f, U=%.3f\n",
            NX, NY, NSTEPS, TAU, U_INLET);
@@ -435,45 +344,34 @@ int main(int argc, char **argv) {
            U_INLET * (2.0*CYL_R) / ((TAU - 0.5) / 3.0));
     fflush(stdout);
 
-    /* -------------------------------------------------------------- */
-    /* CUDA events for accurate GPU timing                            */
-    /* -------------------------------------------------------------- */
-    cudaEvent_t ev_start, ev_stop;
     CUDA_CHECK(cudaEventCreate(&ev_start));
     CUDA_CHECK(cudaEventCreate(&ev_stop));
     CUDA_CHECK(cudaEventRecord(ev_start));
 
-    /* ============================================================== */
-    /* Main time-stepping loop (Step 4: launch kernels on GPU)        */
-    /* ============================================================== */
     for (int t = 1; t <= NSTEPS; t++) {
 
-        /* Step 1: macroscopic variables — 2D grid, one thread per cell */
-        macroscopic_kernel<<<grid2D, block2D>>>(d_f, d_rho, d_ux, d_uy,
-                                                 d_obstacle);
+        /* 1. macroscopic variables */
+        macroscopic_kernel<<<grid2D, block2D>>>(d_f, d_rho, d_ux, d_uy, d_obstacle);
 
-        /* Step 2: BGK collision — same 2D grid */
-        collision_kernel<<<grid2D, block2D>>>(d_f, d_rho, d_ux, d_uy,
-                                               d_obstacle);
+        /* 2. BGK collision */
+        collision_kernel<<<grid2D, block2D>>>(d_f, d_rho, d_ux, d_uy, d_obstacle);
 
-        /* Step 3: streaming with bounce-back — reads f, writes fnew */
+        /* 3. streaming + bounce-back */
         streaming_kernel<<<grid2D, block2D>>>(d_f, d_fnew, d_obstacle);
 
-        /* Step 4: Zou-He inlet at x=0 — 1D grid over y */
+        /* 4. Zou-He inlet */
         inlet_kernel<<<bc_blocks, bc_threads>>>(d_fnew, d_obstacle);
 
-        /* Step 5: zero-gradient outlet at x=NX-1 — 1D grid over y */
+        /* 5. zero-gradient outlet */
         outlet_kernel<<<bc_blocks, bc_threads>>>(d_fnew, d_obstacle);
 
-        /* Step 6: swap device pointers (no data movement!) */
-        double *tmp = d_f; d_f = d_fnew; d_fnew = tmp;
+        /* 6. swap device pointers */
+        { double *tmp = d_f; d_f = d_fnew; d_fnew = tmp; }
 
-        /* Step 7: periodic output — copy data back to host for PGM */
+        /* 7. output: recompute macros on GPU, copy to host, write frames */
         if (t % OUTPUT_INTERVAL == 0) {
-            /* Recompute macros on GPU before copying */
             macroscopic_kernel<<<grid2D, block2D>>>(d_f, d_rho, d_ux, d_uy,
                                                      d_obstacle);
-
             CUDA_CHECK(cudaMemcpy(h_ux, d_ux, Ncells * sizeof(double),
                                   cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_uy, d_uy, Ncells * sizeof(double),
@@ -486,24 +384,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* -------------------------------------------------------------- */
-    /* Stop timing and report results                                 */
-    /* -------------------------------------------------------------- */
     CUDA_CHECK(cudaEventRecord(ev_stop));
     CUDA_CHECK(cudaEventSynchronize(ev_stop));
-    float elapsed_ms;
     CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, ev_start, ev_stop));
-    double elapsed = elapsed_ms / 1000.0;
-    double mlups   = ((double)NSTEPS * NX * NY) / elapsed / 1.0e6;
+    elapsed = elapsed_ms / 1000.0;
+    mlups   = ((double)NSTEPS * NX * NY) / elapsed / 1.0e6;
 
     printf("\nDone.\n");
     printf("Block size: %dx%d\n", bx, by);
     printf("Elapsed:    %.3f s\n", elapsed);
     printf("Throughput: %.2f MLUPS\n", mlups);
 
-    /* -------------------------------------------------------------- */
-    /* Clean up (Step 6 from lecture workflow: free everything)        */
-    /* -------------------------------------------------------------- */
     CUDA_CHECK(cudaEventDestroy(ev_start));
     CUDA_CHECK(cudaEventDestroy(ev_stop));
 
