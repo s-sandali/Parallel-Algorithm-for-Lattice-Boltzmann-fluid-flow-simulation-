@@ -1,30 +1,3 @@
-/*
- * lbm_mpi.c
- *
- * MPI-parallelised D2Q9-BGK Lattice Boltzmann Method:
- * 2D incompressible flow past a circular cylinder.
- *
- * Parallelisation strategy:
- *   - 1D domain decomposition along the x-axis.  The 600-column
- *     lattice is split into contiguous strips, one per MPI process.
- *   - Each process allocates two extra "ghost" columns (one left,
- *     one right) to hold neighbour data needed by the streaming step.
- *   - After the collision step, every process exchanges its outermost
- *     real column of f-values with its neighbour via MPI_Sendrecv.
- *     This is a single call that sends and receives simultaneously,
- *     avoiding deadlock (a key concern from the lectures).
- *   - Boundary conditions:  rank 0 owns x=0 (Zou-He inlet);
- *     the last rank owns x=NX-1 (zero-gradient outlet).
- *   - For PGM output, local velocity arrays are gathered to rank 0
- *     with MPI_Gatherv (variable counts for unequal splits).
- *
- * Build:   mpicc -O3 -o lbm_mpi lbm_mpi.c -lm
- * Run:     mpirun -np 4 ./lbm_mpi
- *
- * References (algorithmic only; this code is original):
- *   - Mocz (2020), Palabos LBM codes, Krüger et al. (2017).
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,9 +14,6 @@
 #define FRAMES_DIR     "frames/mpi"
 #define FRAMES_PPM_DIR "frames/mpi_ppm"
 
-/* ------------------------------------------------------------------ */
-/* Simulation parameters                                              */
-/* ------------------------------------------------------------------ */
 #define NX               600
 #define NY               200
 #define NSTEPS           10000
@@ -56,9 +26,7 @@
 #define CYL_Y            (NY/2)
 #define CYL_R            15
 
-/* ------------------------------------------------------------------ */
-/* D2Q9 lattice constants                                             */
-/* ------------------------------------------------------------------ */
+/* D2Q9 velocities, weights, and opposite-direction indices */
 static const int    ex[9]  = {  0,  1,  0, -1,  0,  1, -1, -1,  1 };
 static const int    ey[9]  = {  0,  0,  1,  0, -1,  1,  1, -1, -1 };
 static const double w_[9]  = { 4.0/9.0,
@@ -66,12 +34,8 @@ static const double w_[9]  = { 4.0/9.0,
                                1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0 };
 static const int    opp[9] = { 0, 3, 4, 1, 2, 7, 8, 5, 6 };
 
-/* ------------------------------------------------------------------ */
-/* Index helpers — local grid has (local_nx + 2) columns (with ghosts)*/
-/* lx = 0 is left ghost, lx = local_nx+1 is right ghost.             */
-/* Real data sits in lx = 1 .. local_nx.                              */
-/* ------------------------------------------------------------------ */
-static int L_NX;   /* set at runtime = local_nx + 2 (total local width) */
+/* local width (set at runtime): local_nx + 2 ghost columns */
+static int L_NX;
 
 static inline int idx_f(int lx, int y, int i) {
     return ((lx * NY) + y) * 9 + i;
@@ -86,9 +50,6 @@ static inline double feq_i(int i, double rho, double ux, double uy) {
     return w_[i] * rho * (1.0 + cu + 0.5*cu*cu - usq);
 }
 
-/* ------------------------------------------------------------------ */
-/* Save PGM from the full-domain arrays on rank 0                     */
-/* ------------------------------------------------------------------ */
 static void save_pgm(int step,
                      const double *ux_full, const double *uy_full,
                      const int    *obs_full)
@@ -123,10 +84,7 @@ static void save_pgm(int step,
     fclose(fp);
 }
 
-/* ------------------------------------------------------------------ */
-/* Save vorticity field as color PPM — called on rank 0 with full     */
-/* domain arrays gathered via MPI_Gatherv.                            */
-/* ------------------------------------------------------------------ */
+/* vorticity: omega = duy/dx - dux/dy, mapped red/white/blue */
 static void save_ppm_vorticity(int step,
                                const double *ux_full, const double *uy_full,
                                const int    *obs_full)
@@ -179,9 +137,6 @@ static void save_ppm_vorticity(int step,
     fclose(fp);
 }
 
-/* ================================================================== */
-/* Main                                                               */
-/* ================================================================== */
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
 
@@ -194,14 +149,9 @@ int main(int argc, char **argv) {
         MKDIR(FRAMES_DIR);
         MKDIR(FRAMES_PPM_DIR);
     }
-    MPI_Barrier(MPI_COMM_WORLD);   /* ensure dirs exist before any rank runs */
+    MPI_Barrier(MPI_COMM_WORLD);
 
-    /* -------------------------------------------------------------- */
-    /* 1D domain decomposition along x.                               */
-    /* Each rank gets a contiguous strip of columns.                   */
-    /* base_nx = NX / nprocs columns each; the last rank gets the     */
-    /* remainder so NX need not be evenly divisible.                   */
-    /* -------------------------------------------------------------- */
+    /* 1D domain decomposition along x */
     int base_nx  = NX / nprocs;
     int leftover = NX % nprocs;
     int local_nx, x_start;
@@ -214,16 +164,11 @@ int main(int argc, char **argv) {
         x_start  = leftover * (base_nx + 1) + (rank - leftover) * base_nx;
     }
 
-    L_NX = local_nx + 2;   /* total local width including 2 ghost columns */
+    L_NX = local_nx + 2;   /* real columns + 2 ghost columns */
 
-    /* Identify left and right neighbours (MPI_PROC_NULL = no neighbour) */
     int left_rank  = (rank > 0)           ? rank - 1 : MPI_PROC_NULL;
     int right_rank = (rank < nprocs - 1)  ? rank + 1 : MPI_PROC_NULL;
 
-    /* -------------------------------------------------------------- */
-    /* Allocate local arrays.                                         */
-    /* Dimensions: L_NX columns × NY rows (including ghost columns).  */
-    /* -------------------------------------------------------------- */
     size_t Ncells_local = (size_t)L_NX * NY;
     size_t Nf_local     = Ncells_local * 9;
 
@@ -239,10 +184,6 @@ int main(int argc, char **argv) {
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    /* -------------------------------------------------------------- */
-    /* Initialise local portion.                                      */
-    /* lx = 1..local_nx are the real cells; ghosts are set to zero.   */
-    /* -------------------------------------------------------------- */
     memset(f,   0, Nf_local     * sizeof(double));
     memset(fnew,0, Nf_local     * sizeof(double));
     memset(obstacle, 0, Ncells_local * sizeof(int));
@@ -266,8 +207,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* We also need the obstacle array in ghost columns for streaming  */
-    /* Exchange obstacle data once (it never changes).                 */
+    /* exchange obstacle ghost columns once (static, never changes) */
     MPI_Sendrecv(&obstacle[idx_c(local_nx, 0)], NY, MPI_INT, right_rank, 0,
                  &obstacle[idx_c(0, 0)],        NY, MPI_INT, left_rank,  0,
                  MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -275,9 +215,7 @@ int main(int argc, char **argv) {
                  &obstacle[idx_c(local_nx+1, 0)],NY, MPI_INT, right_rank, 1,
                  MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-    /* -------------------------------------------------------------- */
-    /* Prepare output gathering arrays (rank 0 only).                 */
-    /* -------------------------------------------------------------- */
+    /* rank 0 output buffers */
     double *ux_full = NULL, *uy_full = NULL;
     int    *obs_full = NULL;
     int    *recvcounts = NULL, *displs = NULL;
@@ -290,9 +228,7 @@ int main(int argc, char **argv) {
         displs     = (int *)malloc(nprocs * sizeof(int));
     }
 
-    /* Every rank computes its own count = local_nx * NY */
     int my_count = local_nx * NY;
-    /* Gather all counts to rank 0 for MPI_Gatherv */
     MPI_Gather(&my_count, 1, MPI_INT,
                recvcounts, 1, MPI_INT, 0, MPI_COMM_WORLD);
     if (rank == 0) {
@@ -301,9 +237,8 @@ int main(int argc, char **argv) {
             displs[r] = displs[r-1] + recvcounts[r-1];
     }
 
-    /* Build full obstacle map on rank 0 (once — it doesn't change) */
+    /* gather obstacle map on rank 0 */
     {
-        /* Pack local obstacle data (real cells only, contiguous) into a buffer */
         int *obs_local = (int *)malloc(my_count * sizeof(int));
         for (int lx = 1; lx <= local_nx; lx++)
             for (int y = 0; y < NY; y++)
@@ -324,21 +259,14 @@ int main(int argc, char **argv) {
         fflush(stdout);
     }
 
-    /* Allocate packing buffers for halo exchange.                     *
-     * Each ghost column holds NY cells × 9 doubles = NY*9 doubles.   */
     int halo_size = NY * 9;
 
     MPI_Barrier(MPI_COMM_WORLD);
     double t0 = MPI_Wtime();
 
-    /* ============================================================== */
-    /* Main time-stepping loop                                        */
-    /* ============================================================== */
     for (int t = 1; t <= NSTEPS; t++) {
 
-        /* ---------------------------------------------------------- *
-         * Step 1: macroscopic variables (local only, no communication)*
-         * ---------------------------------------------------------- */
+        /* 1. macroscopic variables */
         for (int lx = 1; lx <= local_nx; lx++) {
             for (int y = 0; y < NY; y++) {
                 int c = idx_c(lx, y);
@@ -354,9 +282,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* ---------------------------------------------------------- *
-         * Step 2: collision (local only — each cell updates its own f)*
-         * ---------------------------------------------------------- */
+        /* 2. BGK collision */
         for (int lx = 1; lx <= local_nx; lx++) {
             for (int y = 0; y < NY; y++) {
                 int c = idx_c(lx, y);
@@ -370,38 +296,19 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* ---------------------------------------------------------- *
-         * Halo exchange: send post-collision f values to neighbours.  *
-         *                                                             *
-         * After collision, the streaming step needs to pull f from    *
-         * neighbours.  A cell at local column 1 may pull from column  *
-         * 0 (the left ghost), which must contain the right-boundary   *
-         * data from the left-neighbour process.  Likewise, a cell at  *
-         * local_nx may pull from local_nx+1 (the right ghost).       *
-         *                                                             *
-         * MPI_Sendrecv sends and receives in one call, avoiding the   *
-         * deadlock that would occur if everyone tried MPI_Send first. *
-         * ---------------------------------------------------------- */
-
-        /* Send my rightmost real column → right neighbour's left ghost *
-         * Receive from left neighbour's rightmost real → my left ghost */
+        /* halo exchange: send post-collision f to neighbours for streaming */
         MPI_Sendrecv(&f[idx_f(local_nx, 0, 0)], halo_size, MPI_DOUBLE,
                      right_rank, 10,
                      &f[idx_f(0, 0, 0)],         halo_size, MPI_DOUBLE,
                      left_rank,  10,
                      MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-        /* Send my leftmost real column → left neighbour's right ghost *
-         * Receive from right neighbour's leftmost real → my right ghost */
         MPI_Sendrecv(&f[idx_f(1, 0, 0)],          halo_size, MPI_DOUBLE,
                      left_rank,  11,
                      &f[idx_f(local_nx+1, 0, 0)], halo_size, MPI_DOUBLE,
                      right_rank, 11,
                      MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        /* ---------------------------------------------------------- *
-         * Step 3: streaming with bounce-back (local, uses ghosts)    *
-         * ---------------------------------------------------------- */
+        /* 3. streaming + bounce-back */
         for (int lx = 1; lx <= local_nx; lx++) {
             for (int y = 0; y < NY; y++) {
                 int c = idx_c(lx, y);
@@ -413,14 +320,8 @@ int main(int argc, char **argv) {
                     int lxs = lx - ex[i];
                     int ys  = y  - ey[i];
 
-                    /* x-direction wrapping for global periodicity.     *
-                     * Left boundary of rank 0: the left ghost was not  *
-                     * filled (left_rank = MPI_PROC_NULL), so we wrap   *
-                     * by treating the ghost as having outlet-copied     *
-                     * data.  In practice the inlet BC overwrites x=0,  *
-                     * so this just needs to not crash.                 */
-                    if (lxs < 0)     lxs = 0;
-                    if (lxs > local_nx + 1) lxs = local_nx + 1;
+                    if (lxs < 0)             lxs = 0;
+                    if (lxs > local_nx + 1)  lxs = local_nx + 1;
 
                     if (ys < 0 || ys >= NY) {
                         fnew[idx_f(lx, y, i)] = f[idx_f(lx, y, opp[i])];
@@ -436,10 +337,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* ---------------------------------------------------------- *
-         * Step 4: Zou-He inlet at global x = 0 (only rank 0).       *
-         * In rank 0's local coordinates, global x=0 is lx=1.        *
-         * ---------------------------------------------------------- */
+        /* 4. Zou-He inlet at global x = 0 (rank 0 only, local lx = 1) */
         if (rank == 0) {
             for (int y = 1; y < NY-1; y++) {
                 int c = idx_c(1, y);
@@ -463,11 +361,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* ---------------------------------------------------------- *
-         * Step 5: zero-gradient outlet at global x = NX-1.           *
-         * Last rank owns this; in its local coords, NX-1 is          *
-         * lx = local_nx and NX-2 is lx = local_nx - 1.              *
-         * ---------------------------------------------------------- */
+        /* 5. zero-gradient outlet at global x = NX-1 (last rank only) */
         if (rank == nprocs - 1) {
             for (int y = 1; y < NY-1; y++) {
                 int co = idx_c(local_nx, y);
@@ -479,14 +373,11 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Step 6: swap buffers */
+        /* 6. swap buffers */
         double *tmp = f; f = fnew; fnew = tmp;
 
-        /* ---------------------------------------------------------- *
-         * Step 7: periodic output — gather to rank 0, write PGM.    *
-         * ---------------------------------------------------------- */
+        /* 7. output: gather to rank 0, write frames */
         if (t % OUTPUT_INTERVAL == 0) {
-            /* Recompute macros for output */
             for (int lx = 1; lx <= local_nx; lx++) {
                 for (int y = 0; y < NY; y++) {
                     int c = idx_c(lx, y);
@@ -501,7 +392,6 @@ int main(int argc, char **argv) {
                 }
             }
 
-            /* Pack local real cells into contiguous send buffers */
             double *ux_send = (double *)malloc(my_count * sizeof(double));
             double *uy_send = (double *)malloc(my_count * sizeof(double));
             for (int lx = 1; lx <= local_nx; lx++)
@@ -541,7 +431,6 @@ int main(int argc, char **argv) {
         printf("Throughput: %.2f MLUPS\n", mlups);
     }
 
-    /* Clean up */
     free(f); free(fnew);
     free(rho); free(ux); free(uy); free(obstacle);
     if (rank == 0) {
