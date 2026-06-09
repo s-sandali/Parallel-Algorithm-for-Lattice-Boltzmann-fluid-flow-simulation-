@@ -1,5 +1,4 @@
 
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,49 +15,26 @@
 #define FRAMES_DIR     "frames/serial"
 #define FRAMES_PPM_DIR "frames/serial_ppm"
 
+#define NX               600
+#define NY               200
+#define NSTEPS           10000
+#define OUTPUT_INTERVAL  100
 
-//Simulation parameters                                              
-#define NX               600      /* lattice width  (x direction)     */
-#define NY               200      /* lattice height (y direction)     */
-#define NSTEPS           10000    /* number of timesteps              */
-#define OUTPUT_INTERVAL  100      /* save a frame every N steps       */
+#define U_INLET          0.1
+#define TAU              0.6
 
-/*
- * Reynolds number Re = U*D / nu, where nu = (tau - 0.5)/3.
- * Below: U=0.1, D=2*15=30, nu=0.0333  ->  Re = 90  (vortex shedding regime).
- */
-#define U_INLET          0.1      /* inlet velocity (lattice units)   */
-#define TAU              0.6      /* BGK relaxation time              */
+#define CYL_X            (NX/4)
+#define CYL_Y            (NY/2)
+#define CYL_R            15
 
-#define CYL_X            (NX/4)   /* cylinder centre x                */
-#define CYL_Y            (NY/2)   /* cylinder centre y                */
-#define CYL_R            15       /* cylinder radius                  */
-
-/* ------------------------------------------------------------------ */
-/* D2Q9 lattice constants                                             */
-/* ------------------------------------------------------------------ */
-/*
- * Direction layout (i = 0..8):
- *
- *      6   2   5
- *        \ | /
- *      3 - 0 - 1
- *        / | \
- *      7   4   8
- */
+/* D2Q9 velocities, weights, and opposite-direction indices */
 static const int    ex[9]  = {  0,  1,  0, -1,  0,  1, -1, -1,  1 };
 static const int    ey[9]  = {  0,  0,  1,  0, -1,  1,  1, -1, -1 };
 static const double w_[9]  = { 4.0/9.0,
                                1.0/9.0,  1.0/9.0,  1.0/9.0,  1.0/9.0,
                                1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0 };
-/* opp[i] is the index of the velocity opposite to i (used in bounce-back) */
 static const int    opp[9] = { 0, 3, 4, 1, 2, 7, 8, 5, 6 };
 
-/* ------------------------------------------------------------------ */
-/* Index helpers                                                      */
-/* ------------------------------------------------------------------ */
-/* Distribution functions are stored as f[x][y][i] flattened to 1D.   */
-/* Layout: i is the fastest-varying index, then y, then x.            */
 static inline int idx_f(int x, int y, int i) {
     return ((x * NY) + y) * 9 + i;
 }
@@ -66,18 +42,12 @@ static inline int idx_c(int x, int y) {
     return x * NY + y;
 }
 
-/* ------------------------------------------------------------------ */
-/* Equilibrium distribution                                           */
-/* ------------------------------------------------------------------ */
 static inline double feq_i(int i, double rho, double ux, double uy) {
     double cu  = 3.0 * (ex[i]*ux + ey[i]*uy);
     double usq = 1.5 * (ux*ux + uy*uy);
     return w_[i] * rho * (1.0 + cu + 0.5*cu*cu - usq);
 }
 
-/* ------------------------------------------------------------------ */
-/* Save velocity magnitude as a PGM (grayscale) image                 */
-/* ------------------------------------------------------------------ */
 static void save_pgm(int step,
                      const double *ux, const double *uy,
                      const int    *obstacle)
@@ -87,23 +57,21 @@ static void save_pgm(int step,
     FILE *fp = fopen(fname, "wb");
     if (!fp) { perror(fname); return; }
 
-    /* Find max velocity magnitude for normalisation */
     double umax = 1e-12;
-    for (int x = 0; x < NX; x++) {
+    for (int x = 0; x < NX; x++)
         for (int y = 0; y < NY; y++) {
             int c = idx_c(x, y);
             double m = sqrt(ux[c]*ux[c] + uy[c]*uy[c]);
             if (m > umax) umax = m;
         }
-    }
 
     fprintf(fp, "P5\n%d %d\n255\n", NX, NY);
-    for (int y = NY-1; y >= 0; y--) {            /* flip y so image is upright */
+    for (int y = NY-1; y >= 0; y--) {
         for (int x = 0; x < NX; x++) {
             int c = idx_c(x, y);
             unsigned char px;
             if (obstacle[c]) {
-                px = 0;                          /* cylinder = black */
+                px = 0;
             } else {
                 double m = sqrt(ux[c]*ux[c] + uy[c]*uy[c]);
                 int v = (int)(255.0 * m / umax);
@@ -117,9 +85,7 @@ static void save_pgm(int step,
     fclose(fp);
 }
 
-/* ------------------------------------------------------------------ */
-/* Save vorticity field as a color PPM image (red=+, white=0, blue=-) */
-/* ------------------------------------------------------------------ */
+/* vorticity: omega = duy/dx - dux/dy, mapped red/white/blue */
 static void save_ppm_vorticity(int step,
                                const double *ux, const double *uy,
                                const int    *obstacle)
@@ -152,7 +118,7 @@ static void save_ppm_vorticity(int step,
             if (obstacle[idx_c(x, y)]) {
                 r = g = b = 30;
             } else {
-                double t = omega[idx_c(x, y)] / omax;   /* [-1, 1] */
+                double t = omega[idx_c(x, y)] / omax;
                 if (t >= 0.0) {
                     r = 255;
                     g = (unsigned char)(255.0 * (1.0 - t));
@@ -170,9 +136,6 @@ static void save_ppm_vorticity(int step,
     fclose(fp);
 }
 
-/* ------------------------------------------------------------------ */
-/* Main                                                               */
-/* ------------------------------------------------------------------ */
 int main(void) {
     MKDIR("frames");
     MKDIR(FRAMES_DIR);
@@ -193,16 +156,10 @@ int main(void) {
         return 1;
     }
 
-    /* -------------------------------------------------------------- */
-    /* Initialise: uniform rightward flow, mark cylinder cells.       */
-    /* A small sinusoidal perturbation on ux breaks perfect symmetry  */
-    /* so vortex shedding develops in finite time.                    */
-    /* -------------------------------------------------------------- */
     for (int x = 0; x < NX; x++) {
         for (int y = 0; y < NY; y++) {
             int c = idx_c(x, y);
             rho[c] = 1.0;
-            /* small 4-cycle sinusoid in x, amplitude 2% of U */
             double pert = 1.0 + 0.02 * cos(2.0 * M_PI * x / (double)NX * 4.0);
             ux[c]  = U_INLET * pert;
             uy[c]  = 0.0;
@@ -210,31 +167,25 @@ int main(void) {
             int dx_ = x - CYL_X;
             int dy_ = y - CYL_Y;
             obstacle[c] = (dx_*dx_ + dy_*dy_ <= CYL_R*CYL_R) ? 1 : 0;
-
-            /* top and bottom walls also act as solids (no-slip) */
             if (y == 0 || y == NY-1) obstacle[c] = 1;
 
-            for (int i = 0; i < 9; i++) {
+            for (int i = 0; i < 9; i++)
                 f[idx_f(x, y, i)] = feq_i(i, rho[c], ux[c], uy[c]);
-            }
         }
     }
 
     printf("D2Q9-BGK LBM serial: %dx%d lattice, %d steps, tau=%.2f, U=%.3f\n",
            NX, NY, NSTEPS, TAU, U_INLET);
-    printf("Reynolds number ~ %.1f (based on cylinder diameter)\n",
+    printf("Reynolds number ~ %.1f\n",
            U_INLET * (2.0*CYL_R) / ((TAU - 0.5) / 3.0));
     fflush(stdout);
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    /* -------------------------------------------------------------- */
-    /* Main time-stepping loop                                        */
-    /* -------------------------------------------------------------- */
     for (int t = 1; t <= NSTEPS; t++) {
 
-        /* 1. Macroscopic variables */
+        /* 1. macroscopic variables */
         for (int x = 0; x < NX; x++) {
             for (int y = 0; y < NY; y++) {
                 int c = idx_c(x, y);
@@ -246,21 +197,13 @@ int main(void) {
                     my += ey[i] * fi;
                 }
                 rho[c] = r;
-                if (r > 0.0) {
-                    ux[c] = mx / r;
-                    uy[c] = my / r;
-                } else {
-                    ux[c] = 0.0;
-                    uy[c] = 0.0;
-                }
-                if (obstacle[c]) {
-                    ux[c] = 0.0;
-                    uy[c] = 0.0;
-                }
+                if (r > 0.0) { ux[c] = mx / r; uy[c] = my / r; }
+                else         { ux[c] = 0.0;     uy[c] = 0.0;     }
+                if (obstacle[c]) { ux[c] = 0.0; uy[c] = 0.0; }
             }
         }
 
-        /* 2. Collision (BGK) */
+        /* 2. BGK collision */
         for (int x = 0; x < NX; x++) {
             for (int y = 0; y < NY; y++) {
                 int c = idx_c(x, y);
@@ -274,14 +217,7 @@ int main(void) {
             }
         }
 
-        /* 3. Streaming with bounce-back at obstacle cells.
-         *
-         * Pull-style streaming: at every fluid cell, pull f_i from its
-         * upstream neighbour (x - ex[i], y - ey[i]). If that neighbour
-         * is solid, instead take f_{opp[i]} from the current cell
-         * (no-slip bounce-back). For solid cells we just leave fnew as 0;
-         * those cells are skipped in the next macroscopic step anyway.
-         */
+        /* 3. streaming + bounce-back (pull-style) */
         for (int x = 0; x < NX; x++) {
             for (int y = 0; y < NY; y++) {
                 int c = idx_c(x, y);
@@ -293,19 +229,15 @@ int main(void) {
                     int xs = x - ex[i];
                     int ys = y - ey[i];
 
-                    /* periodic in x (so outlet wraps; outlet copy fixes this) */
                     if (xs < 0)    xs += NX;
                     if (xs >= NX)  xs -= NX;
 
                     if (ys < 0 || ys >= NY) {
-                        /* shouldn't happen because top/bottom are solid,
-                         * but just in case: bounce back from self */
                         fnew[idx_f(x, y, i)] = f[idx_f(x, y, opp[i])];
                         continue;
                     }
 
                     if (obstacle[idx_c(xs, ys)]) {
-                        /* solid neighbour: bounce-back */
                         fnew[idx_f(x, y, i)] = f[idx_f(x, y, opp[i])];
                     } else {
                         fnew[idx_f(x, y, i)] = f[idx_f(xs, ys, i)];
@@ -314,14 +246,11 @@ int main(void) {
             }
         }
 
-        /* 4. Inlet boundary at x = 0 (Zou-He velocity inlet).
-         *    Force u = (U_INLET, 0) and recompute incoming distributions.
-         */
+        /* 4. Zou-He inlet at x = 0 */
         for (int y = 1; y < NY-1; y++) {
             int c = idx_c(0, y);
             if (obstacle[c]) continue;
 
-            /* density consistent with prescribed inlet velocity */
             double f0 = fnew[idx_f(0, y, 0)];
             double f2 = fnew[idx_f(0, y, 2)];
             double f4 = fnew[idx_f(0, y, 4)];
@@ -331,29 +260,24 @@ int main(void) {
 
             double rho_in = (f0 + f2 + f4 + 2.0*(f3 + f6 + f7)) / (1.0 - U_INLET);
 
-            /* unknowns: f1, f5, f8 (those pointing into the domain) */
             fnew[idx_f(0, y, 1)] = f3 + (2.0/3.0) * rho_in * U_INLET;
-            fnew[idx_f(0, y, 5)] = f7 + 0.5*(f4 - f2)
-                                 + (1.0/6.0) * rho_in * U_INLET;
-            fnew[idx_f(0, y, 8)] = f6 + 0.5*(f2 - f4)
-                                 + (1.0/6.0) * rho_in * U_INLET;
+            fnew[idx_f(0, y, 5)] = f7 + 0.5*(f4 - f2) + (1.0/6.0) * rho_in * U_INLET;
+            fnew[idx_f(0, y, 8)] = f6 + 0.5*(f2 - f4) + (1.0/6.0) * rho_in * U_INLET;
         }
 
-        /* 5. Outlet at x = NX-1: simple zero-gradient (copy from x=NX-2). */
+        /* 5. zero-gradient outlet at x = NX-1 */
         for (int y = 1; y < NY-1; y++) {
             int co = idx_c(NX-1, y);
             if (obstacle[co]) continue;
-            for (int i = 0; i < 9; i++) {
+            for (int i = 0; i < 9; i++)
                 fnew[idx_f(NX-1, y, i)] = fnew[idx_f(NX-2, y, i)];
-            }
         }
 
-        /* 6. Swap buffers */
+        /* 6. swap buffers */
         double *tmp = f; f = fnew; fnew = tmp;
 
-        /* 7. Periodic output */
+        /* 7. output */
         if (t % OUTPUT_INTERVAL == 0) {
-            /* Recompute macros for output (just ux, uy from current f). */
             for (int x = 0; x < NX; x++) {
                 for (int y = 0; y < NY; y++) {
                     int c = idx_c(x, y);
@@ -366,7 +290,7 @@ int main(void) {
                         my += ey[i] * fi;
                     }
                     if (r > 0.0) { ux[c] = mx/r; uy[c] = my/r; }
-                    else         { ux[c] = 0.0; uy[c] = 0.0; }
+                    else         { ux[c] = 0.0;   uy[c] = 0.0;   }
                 }
             }
             save_pgm(t, ux, uy, obstacle);
@@ -382,8 +306,7 @@ int main(void) {
 
     printf("\nDone.\n");
     printf("Elapsed:    %.3f s\n", elapsed);
-    printf("Throughput: %.2f MLUPS (mega lattice updates per second)\n",
-           mlups);
+    printf("Throughput: %.2f MLUPS\n", mlups);
 
     free(f); free(fnew);
     free(rho); free(ux); free(uy); free(obstacle);
